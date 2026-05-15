@@ -1,4 +1,4 @@
-﻿{
+{
     "version": "2.0.0",
     "tasks": [
         {
@@ -28,7 +28,10 @@
                 "-Configuration", "Release",
                 "-Platform", "x64"
             ],
-            "group": "build",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
             "problemMatcher": [ "$msCompile" ],
             "detail": "CMake build all (Release x64)"
         },

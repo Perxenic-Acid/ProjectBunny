@@ -34,34 +34,26 @@ if (-not (Test-Path $vcvars)) {
     exit 1
 }
 
+# 生成临时批处理文件（避免 cmd /c 的 & 转义问题）
+$tmpScript = "$env:TEMP\cmake_build_$PID.bat"
+$content = @"
+@echo off
+call "$vcvars" > nul
+if errorlevel 1 exit /b 1
+"$cmake" -S "$root" -B "$buildDir" -G "Ninja" -DCMAKE_BUILD_TYPE="$Configuration"
+if errorlevel 1 exit /b 1
+"$cmake" --build "$buildDir"
+"@
+
 # CMake 配置
 Write-Host "===== Configuring CMake ($Configuration|$Platform) =====" -ForegroundColor Cyan
-$genArgs = @(
-    "-S", $root
-    "-B", $buildDir
-    "-G", "Ninja"
-    "-DCMAKE_BUILD_TYPE=$Configuration"
-)
-
-# x64 架构设置
-if ($Platform -eq 'x64') {
-    $genArgs += @()
-}
-
-$configureCmd = "call `"$vcvars`" > nul 2>&1 && & `"$cmake`" $genArgs"
-cmd /c $configureCmd 2>&1
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "FAILED: Configure" -ForegroundColor Red
-    exit $LASTEXITCODE
-}
-
-# CMake 构建
-Write-Host "`n===== Building ($Configuration|$Platform) =====" -ForegroundColor Cyan
-$buildCmd = "call `"$vcvars`" > nul 2>&1 && & `"$cmake`" --build `"$buildDir`""
-cmd /c $buildCmd 2>&1
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "FAILED: Build" -ForegroundColor Red
-    exit $LASTEXITCODE
+$content | Set-Content -Path $tmpScript -Encoding ASCII
+cmd /c $tmpScript 2>&1
+$exitCode = $LASTEXITCODE
+Remove-Item $tmpScript -Force -ErrorAction SilentlyContinue
+if ($exitCode -ne 0) {
+    Write-Host "FAILED: CMake $($Configuration) $($Platform)" -ForegroundColor Red
+    exit $exitCode
 }
 
 # 复制产物到统一输出目录

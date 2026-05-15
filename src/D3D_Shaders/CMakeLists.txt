@@ -16,11 +16,6 @@ target_link_libraries(D3D_Shaders PRIVATE
     d3dcompiler.lib
 )
 
-# Release: IgnoreAllDefaultLibraries (从原 vcxproj 迁移)
-target_link_options(D3D_Shaders PRIVATE
-    $<$<CONFIG:Release>:/NODEFAULTLIB>
-)
-
 set_target_msvc_options(D3D_Shaders)
 set_target_common_definitions(D3D_Shaders)
 
