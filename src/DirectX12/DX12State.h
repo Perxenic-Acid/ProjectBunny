@@ -18,3 +18,5 @@ LONG DX12GetPresentCount();
 void DX12SetOverlayWindow(HWND hwnd);
 HWND DX12GetOverlayWindow();
 
+void DX12SetOverlayStatus(const wchar_t *status);
+void DX12GetOverlayStatus(wchar_t *status, size_t statusCount);

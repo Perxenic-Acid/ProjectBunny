@@ -10,6 +10,7 @@ static HINSTANCE gModule = nullptr;
 static FILE *gLog = nullptr;
 static volatile LONG gPresentCount = 0;
 static HWND gOverlayWindow = nullptr;
+static wchar_t gOverlayStatus[256] = L"3DMigoto DX12 hook alive";
 static SRWLOCK gStateLock = SRWLOCK_INIT;
 static CNktHookLib gHookMgr;
 static std::unordered_set<void*> gHookedFunctions;
@@ -104,3 +105,26 @@ HWND DX12GetOverlayWindow()
 	return gOverlayWindow;
 }
 
+void DX12SetOverlayStatus(const wchar_t *status)
+{
+	AcquireSRWLockExclusive(&gStateLock);
+	if (status && status[0])
+		wcsncpy_s(gOverlayStatus, status, _TRUNCATE);
+	else
+		wcsncpy_s(gOverlayStatus, L"3DMigoto DX12 hook alive", _TRUNCATE);
+	ReleaseSRWLockExclusive(&gStateLock);
+
+	HWND hwnd = DX12GetOverlayWindow();
+	if (hwnd)
+		InvalidateRect(hwnd, nullptr, FALSE);
+}
+
+void DX12GetOverlayStatus(wchar_t *status, size_t statusCount)
+{
+	if (!status || statusCount == 0)
+		return;
+
+	AcquireSRWLockShared(&gStateLock);
+	wcsncpy_s(status, statusCount, gOverlayStatus, _TRUNCATE);
+	ReleaseSRWLockShared(&gStateLock);
+}

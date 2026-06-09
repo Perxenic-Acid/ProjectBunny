@@ -2,6 +2,7 @@
 
 #include <dxgi1_4.h>
 
+#include "DX12Input.h"
 #include "DX12Overlay.h"
 #include "DX12State.h"
 
@@ -202,6 +203,7 @@ static HRESULT STDMETHODCALLTYPE HookedCreateSwapChainForComposition(
 
 static HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain *swapChain, UINT syncInterval, UINT flags)
 {
+	DX12PollInput();
 	HRESULT hr = gOrigPresent(swapChain, syncInterval, flags);
 	DX12IncrementPresentCount();
 	DX12DrawSwapChainText(swapChain);
@@ -211,6 +213,7 @@ static HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain *swapChain, UINT s
 static HRESULT STDMETHODCALLTYPE HookedPresent1(
 	IDXGISwapChain1 *swapChain, UINT syncInterval, UINT flags, const DXGI_PRESENT_PARAMETERS *presentParameters)
 {
+	DX12PollInput();
 	HRESULT hr = gOrigPresent1(swapChain, syncInterval, flags, presentParameters);
 	DX12IncrementPresentCount();
 	DX12DrawSwapChainText(swapChain);
@@ -244,4 +247,3 @@ void DX12InstallDXGIHooks()
 	DX12HookFunction(reinterpret_cast<void**>(&gOrigCreateDXGIFactory2),
 		GetProcAddress(dxgi, "CreateDXGIFactory2"), HookedCreateDXGIFactory2, "CreateDXGIFactory2");
 }
-

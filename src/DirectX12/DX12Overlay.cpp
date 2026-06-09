@@ -14,17 +14,31 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARA
 	{
 		PAINTSTRUCT ps;
 		HDC dc = BeginPaint(hwnd, &ps);
-		RECT rect;
-		GetClientRect(hwnd, &rect);
+		RECT client;
+		GetClientRect(hwnd, &client);
+		HBRUSH transparentBrush = CreateSolidBrush(RGB(1, 1, 1));
+		FillRect(dc, &client, transparentBrush);
+		DeleteObject(transparentBrush);
 
-		FillRect(dc, &rect, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
-		SetBkMode(dc, TRANSPARENT);
-		SetTextColor(dc, RGB(0, 255, 0));
 		HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
 		HGDIOBJ oldFont = font ? SelectObject(dc, font) : nullptr;
 
-		wchar_t text[128];
-		wsprintfW(text, L"3DMigoto DX12 hook alive | Present: %ld", DX12GetPresentCount());
+		wchar_t text[256];
+		DX12GetOverlayStatus(text, ARRAYSIZE(text));
+
+		SIZE size = {};
+		GetTextExtentPoint32W(dc, text, lstrlenW(text), &size);
+
+		RECT background = {
+			12,
+			8,
+			20 + size.cx,
+			18 + size.cy
+		};
+		FillRect(dc, &background, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+
+		SetBkMode(dc, TRANSPARENT);
+		SetTextColor(dc, RGB(0, 255, 0));
 		TextOutW(dc, 16, 12, text, lstrlenW(text));
 
 		if (oldFont)
@@ -73,7 +87,7 @@ DWORD WINAPI DX12OverlayThread(void*)
 	}
 
 	DX12SetOverlayWindow(hwnd);
-	SetLayeredWindowAttributes(hwnd, RGB(0, 0, 0), 0, LWA_COLORKEY);
+	SetLayeredWindowAttributes(hwnd, RGB(1, 1, 1), 220, LWA_COLORKEY | LWA_ALPHA);
 	ShowWindow(hwnd, SW_SHOWNOACTIVATE);
 	SetWindowPos(hwnd, HWND_TOPMOST, x, y, width, height,
 		SWP_NOACTIVATE | SWP_SHOWWINDOW);
@@ -107,9 +121,19 @@ void DX12DrawSwapChainText(IDXGISwapChain *swapChain)
 	COLORREF oldTextColor = SetTextColor(dc, RGB(0, 255, 0));
 	HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
 	HGDIOBJ oldFont = font ? SelectObject(dc, font) : nullptr;
-	const wchar_t text[] = L"3DMigoto DX12 hook alive";
+	wchar_t text[256];
+	DX12GetOverlayStatus(text, ARRAYSIZE(text));
+	SIZE size = {};
+	GetTextExtentPoint32W(dc, text, lstrlenW(text), &size);
+	RECT background = {
+		16,
+		16,
+		24 + size.cx,
+		26 + size.cy
+	};
+	FillRect(dc, &background, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
 
-	TextOutW(dc, 20, 20, text, ARRAYSIZE(text) - 1);
+	TextOutW(dc, 20, 20, text, lstrlenW(text));
 
 	if (oldFont)
 		SelectObject(dc, oldFont);
@@ -124,4 +148,3 @@ void DX12CloseOverlayWindow()
 	if (hwnd)
 		PostMessageW(hwnd, WM_CLOSE, 0, 0);
 }
-

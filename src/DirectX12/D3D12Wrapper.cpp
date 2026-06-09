@@ -2,6 +2,7 @@
 
 #include <Shlwapi.h>
 
+#include "DX12DeviceHooks.h"
 #include "DX12Overlay.h"
 #include "DX12State.h"
 #include "DXGIHooks.h"
@@ -128,7 +129,11 @@ extern "C" HRESULT WINAPI D3D12CreateDevice(
 	DX12Log("D3D12CreateDevice adapter=%p minFeature=0x%x\n", adapter, minimumFeatureLevel);
 	if (!gOrigD3D12CreateDevice)
 		return E_FAIL;
-	return gOrigD3D12CreateDevice(adapter, minimumFeatureLevel, riid, device);
+	HRESULT hr = gOrigD3D12CreateDevice(adapter, minimumFeatureLevel, riid, device);
+	DX12Log("D3D12CreateDevice result=0x%lx device=%p\n", hr, device ? *device : nullptr);
+	if (SUCCEEDED(hr) && device && *device)
+		DX12HookDevice(static_cast<IUnknown*>(*device));
+	return hr;
 }
 
 extern "C" HRESULT WINAPI D3D12GetDebugInterface(REFIID riid, void **debug)
