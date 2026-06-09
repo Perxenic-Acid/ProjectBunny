@@ -1,5 +1,7 @@
 #include "DX12ShaderDump.h"
 
+#include <d3dcompiler.h>
+#include <dxcapi.h>
 #include <Shlwapi.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -32,6 +34,61 @@ static std::unordered_map<std::string, ShaderRecord> gShaders;
 static std::vector<PsoRecord> gPsos;
 static std::unordered_map<ID3D12PipelineState*, DX12PsoShaderInfo> gPsoShaderInfo;
 static UINT64 gPsoSerial = 0;
+
+typedef HRESULT(WINAPI *PFN_D3D_DISASSEMBLE)(
+	LPCVOID, SIZE_T, UINT, LPCSTR, ID3DBlob**);
+
+static HMODULE gD3DCompiler = nullptr;
+static PFN_D3D_DISASSEMBLE gD3DDisassemble = nullptr;
+
+static HMODULE gDXCompiler = nullptr;
+static DxcCreateInstanceProc gDxcCreateInstance = nullptr;
+static IDxcCompiler3 *gDxcCompiler = nullptr;
+
+static constexpr uint32_t MakeFourCC(char a, char b, char c, char d)
+{
+	return static_cast<uint32_t>(static_cast<uint8_t>(a)) |
+		(static_cast<uint32_t>(static_cast<uint8_t>(b)) << 8) |
+		(static_cast<uint32_t>(static_cast<uint8_t>(c)) << 16) |
+		(static_cast<uint32_t>(static_cast<uint8_t>(d)) << 24);
+}
+
+static bool ReadU32LE(const uint8_t *data, size_t size, size_t offset, uint32_t *value)
+{
+	if (!value || offset + sizeof(uint32_t) > size)
+		return false;
+	memcpy(value, data + offset, sizeof(uint32_t));
+	return true;
+}
+
+static bool ShaderHasChunk(const std::vector<uint8_t> &bytecode, uint32_t fourCC)
+{
+	if (bytecode.size() < 32 || memcmp(bytecode.data(), "DXBC", 4))
+		return false;
+
+	uint32_t chunkCount = 0;
+	if (!ReadU32LE(bytecode.data(), bytecode.size(), 28, &chunkCount))
+		return false;
+
+	for (uint32_t i = 0; i < chunkCount; ++i) {
+		uint32_t chunkOffset = 0;
+		if (!ReadU32LE(bytecode.data(), bytecode.size(), 32 + sizeof(uint32_t) * i, &chunkOffset))
+			return false;
+		if (chunkOffset + sizeof(uint32_t) > bytecode.size())
+			continue;
+		uint32_t chunkFourCC = 0;
+		memcpy(&chunkFourCC, bytecode.data() + chunkOffset, sizeof(chunkFourCC));
+		if (chunkFourCC == fourCC)
+			return true;
+	}
+
+	return false;
+}
+
+static bool ShaderIsDXIL(const ShaderRecord &record)
+{
+	return ShaderHasChunk(record.bytecode, MakeFourCC('D', 'X', 'I', 'L'));
+}
 
 static uint64_t Fnv1a64(const void *data, size_t size)
 {
@@ -110,6 +167,161 @@ static bool WriteShaderFile(const wchar_t *dir, const ShaderRecord &record)
 	fwrite(record.bytecode.data(), 1, record.bytecode.size(), file);
 	fclose(file);
 	return true;
+}
+
+static bool EnsureD3DDisassemble()
+{
+	if (gD3DDisassemble)
+		return true;
+
+	if (!gD3DCompiler) {
+		wchar_t path[MAX_PATH];
+		if (GetSystemDirectoryW(path, MAX_PATH)) {
+			PathAppendW(path, L"d3dcompiler_47.dll");
+			gD3DCompiler = LoadLibraryW(path);
+		}
+		if (!gD3DCompiler)
+			gD3DCompiler = LoadLibraryW(L"d3dcompiler_47.dll");
+	}
+
+	if (!gD3DCompiler) {
+		DX12Log("Failed to load d3dcompiler_47.dll for shader disassembly, error=%lu\n",
+			GetLastError());
+		return false;
+	}
+
+	gD3DDisassemble = reinterpret_cast<PFN_D3D_DISASSEMBLE>(
+		GetProcAddress(gD3DCompiler, "D3DDisassemble"));
+	if (!gD3DDisassemble) {
+		DX12Log("Failed to find D3DDisassemble in d3dcompiler_47.dll\n");
+		return false;
+	}
+
+	return true;
+}
+
+static bool EnsureDXILDisassemble()
+{
+	if (gDxcCompiler)
+		return true;
+
+	if (!gDXCompiler) {
+		const wchar_t *sdkPath =
+			L"C:\\Program Files (x86)\\Windows Kits\\10\\bin\\10.0.26100.0\\x64\\dxcompiler.dll";
+		if (PathFileExistsW(sdkPath))
+			gDXCompiler = LoadLibraryW(sdkPath);
+		if (!gDXCompiler)
+			gDXCompiler = LoadLibraryW(L"dxcompiler.dll");
+	}
+
+	if (!gDXCompiler) {
+		DX12Log("Failed to load dxcompiler.dll for DXIL disassembly, error=%lu\n",
+			GetLastError());
+		return false;
+	}
+
+	gDxcCreateInstance = reinterpret_cast<DxcCreateInstanceProc>(
+		GetProcAddress(gDXCompiler, "DxcCreateInstance"));
+	if (!gDxcCreateInstance) {
+		DX12Log("Failed to find DxcCreateInstance in dxcompiler.dll\n");
+		return false;
+	}
+
+	HRESULT hr = gDxcCreateInstance(CLSID_DxcCompiler, IID_PPV_ARGS(&gDxcCompiler));
+	if (FAILED(hr) || !gDxcCompiler) {
+		DX12Log("Failed to create IDxcCompiler3 for DXIL disassembly hr=0x%lx\n", hr);
+		return false;
+	}
+
+	return true;
+}
+
+static bool WriteDXBCDisassemblyFile(const wchar_t *path, const ShaderRecord &record)
+{
+	if (!EnsureD3DDisassemble())
+		return false;
+
+	ID3DBlob *disassembly = nullptr;
+	const UINT flags = D3D_DISASM_ENABLE_DEFAULT_VALUE_PRINTS | D3D_DISASM_DISABLE_DEBUG_INFO;
+	HRESULT hr = gD3DDisassemble(
+		record.bytecode.data(), record.bytecode.size(), flags, nullptr, &disassembly);
+	if (FAILED(hr) || !disassembly) {
+		DX12Log("D3DDisassemble failed for %016llx-%s.bin hr=0x%lx\n",
+			static_cast<unsigned long long>(record.hash), record.stage.c_str(), hr);
+		return false;
+	}
+
+	FILE *file = _wfsopen(path, L"wb", _SH_DENYNO);
+	if (!file) {
+		disassembly->Release();
+		return false;
+	}
+
+	fwrite(disassembly->GetBufferPointer(), 1, disassembly->GetBufferSize(), file);
+	fclose(file);
+	disassembly->Release();
+	return true;
+}
+
+static bool WriteDXILDisassemblyFile(const wchar_t *path, const ShaderRecord &record)
+{
+	if (!EnsureDXILDisassemble())
+		return false;
+
+	DxcBuffer buffer = {};
+	buffer.Ptr = record.bytecode.data();
+	buffer.Size = record.bytecode.size();
+	buffer.Encoding = DXC_CP_ACP;
+
+	IDxcResult *result = nullptr;
+	HRESULT hr = gDxcCompiler->Disassemble(&buffer, IID_PPV_ARGS(&result));
+	if (FAILED(hr) || !result) {
+		DX12Log("DXIL Disassemble failed for %016llx-%s.bin hr=0x%lx\n",
+			static_cast<unsigned long long>(record.hash), record.stage.c_str(), hr);
+		return false;
+	}
+
+	HRESULT status = S_OK;
+	result->GetStatus(&status);
+	if (FAILED(status)) {
+		DX12Log("DXIL Disassemble status failed for %016llx-%s.bin status=0x%lx\n",
+			static_cast<unsigned long long>(record.hash), record.stage.c_str(), status);
+		result->Release();
+		return false;
+	}
+
+	IDxcBlobUtf8 *disassembly = nullptr;
+	hr = result->GetOutput(DXC_OUT_DISASSEMBLY, IID_PPV_ARGS(&disassembly), nullptr);
+	if (FAILED(hr) || !disassembly) {
+		DX12Log("DXIL Disassemble output missing for %016llx-%s.bin hr=0x%lx\n",
+			static_cast<unsigned long long>(record.hash), record.stage.c_str(), hr);
+		result->Release();
+		return false;
+	}
+
+	FILE *file = _wfsopen(path, L"wb", _SH_DENYNO);
+	if (!file) {
+		disassembly->Release();
+		result->Release();
+		return false;
+	}
+
+	fwrite(disassembly->GetStringPointer(), 1, disassembly->GetStringLength(), file);
+	fclose(file);
+	disassembly->Release();
+	result->Release();
+	return true;
+}
+
+static bool WriteShaderDisassemblyFile(const wchar_t *dir, const ShaderRecord &record)
+{
+	wchar_t path[MAX_PATH];
+	swprintf_s(path, L"%s\\%016llx-%S.asm.txt",
+		dir, static_cast<unsigned long long>(record.hash), record.stage.c_str());
+
+	if (ShaderIsDXIL(record))
+		return WriteDXILDisassemblyFile(path, record);
+	return WriteDXBCDisassemblyFile(path, record);
 }
 
 static size_t AlignUp(size_t value, size_t alignment)
@@ -352,23 +564,28 @@ void DX12DumpCachedShaders()
 	ReleaseSRWLockShared(&gDumpLock);
 
 	UINT writtenShaders = 0;
+	UINT writtenDisassembly = 0;
 	for (const ShaderRecord &shader : shaders) {
 		if (WriteShaderFile(dir, shader))
 			writtenShaders++;
+		if (WriteShaderDisassemblyFile(dir, shader))
+			writtenDisassembly++;
 	}
 
 	wchar_t usagePath[MAX_PATH];
 	swprintf_s(usagePath, L"%s\\ShaderUsage.txt", dir);
 	FILE *usage = _wfsopen(usagePath, L"w", _SH_DENYNO);
 	if (usage) {
-		fprintf(usage, "hash,stage,size,uses,first_pso,file\n");
+		fprintf(usage, "hash,stage,size,uses,first_pso,file,asm_file\n");
 		for (const ShaderRecord &shader : shaders) {
-			fprintf(usage, "%016llx,%s,%zu,%llu,%llu,%016llx-%s.bin\n",
+			fprintf(usage, "%016llx,%s,%zu,%llu,%llu,%016llx-%s.bin,%016llx-%s.asm.txt\n",
 				static_cast<unsigned long long>(shader.hash),
 				shader.stage.c_str(),
 				shader.bytecode.size(),
 				static_cast<unsigned long long>(shader.useCount),
 				static_cast<unsigned long long>(shader.firstPsoIndex),
+				static_cast<unsigned long long>(shader.hash),
+				shader.stage.c_str(),
 				static_cast<unsigned long long>(shader.hash),
 				shader.stage.c_str());
 		}
@@ -391,8 +608,9 @@ void DX12DumpCachedShaders()
 	}
 
 	wchar_t status[128];
-	swprintf_s(status, L"F8 dumped %u shaders / %zu PSOs", writtenShaders, psos.size());
+	swprintf_s(status, L"F8 dumped %u shaders / %u asm / %zu PSOs",
+		writtenShaders, writtenDisassembly, psos.size());
 	DX12SetOverlayStatus(status);
-	DX12Log("F8 shader dump complete: dir=%S shaders=%u/%zu psos=%zu\n",
-		dir, writtenShaders, shaders.size(), psos.size());
+	DX12Log("F8 shader dump complete: dir=%S shaders=%u/%zu asm=%u/%zu psos=%zu\n",
+		dir, writtenShaders, shaders.size(), writtenDisassembly, shaders.size(), psos.size());
 }
