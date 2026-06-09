@@ -21,6 +21,12 @@ typedef void(STDMETHODCALLTYPE *PFN_SET_DESCRIPTOR_HEAPS)(
 	ID3D12GraphicsCommandList*, UINT, ID3D12DescriptorHeap *const*);
 typedef void(STDMETHODCALLTYPE *PFN_SET_ROOT_DESCRIPTOR_TABLE)(
 	ID3D12GraphicsCommandList*, UINT, D3D12_GPU_DESCRIPTOR_HANDLE);
+typedef void(STDMETHODCALLTYPE *PFN_IA_SET_PRIMITIVE_TOPOLOGY)(
+	ID3D12GraphicsCommandList*, D3D12_PRIMITIVE_TOPOLOGY);
+typedef void(STDMETHODCALLTYPE *PFN_IA_SET_INDEX_BUFFER)(
+	ID3D12GraphicsCommandList*, const D3D12_INDEX_BUFFER_VIEW*);
+typedef void(STDMETHODCALLTYPE *PFN_IA_SET_VERTEX_BUFFERS)(
+	ID3D12GraphicsCommandList*, UINT, UINT, const D3D12_VERTEX_BUFFER_VIEW*);
 typedef void(STDMETHODCALLTYPE *PFN_DRAW_INSTANCED)(
 	ID3D12GraphicsCommandList*, UINT, UINT, UINT, UINT);
 typedef void(STDMETHODCALLTYPE *PFN_DRAW_INDEXED_INSTANCED)(
@@ -36,6 +42,9 @@ static PFN_RESOURCE_BARRIER gOrigResourceBarrier = nullptr;
 static PFN_SET_DESCRIPTOR_HEAPS gOrigSetDescriptorHeaps = nullptr;
 static PFN_SET_ROOT_DESCRIPTOR_TABLE gOrigSetComputeRootDescriptorTable = nullptr;
 static PFN_SET_ROOT_DESCRIPTOR_TABLE gOrigSetGraphicsRootDescriptorTable = nullptr;
+static PFN_IA_SET_PRIMITIVE_TOPOLOGY gOrigIASetPrimitiveTopology = nullptr;
+static PFN_IA_SET_INDEX_BUFFER gOrigIASetIndexBuffer = nullptr;
+static PFN_IA_SET_VERTEX_BUFFERS gOrigIASetVertexBuffers = nullptr;
 static PFN_DRAW_INSTANCED gOrigDrawInstanced = nullptr;
 static PFN_DRAW_INDEXED_INSTANCED gOrigDrawIndexedInstanced = nullptr;
 static PFN_DISPATCH gOrigDispatch = nullptr;
@@ -136,7 +145,8 @@ static void STDMETHODCALLTYPE HookedDrawInstanced(
 	ID3D12GraphicsCommandList *commandList, UINT vertexCountPerInstance, UINT instanceCount,
 	UINT startVertexLocation, UINT startInstanceLocation)
 {
-	DX12BindingRecordDraw(commandList, "draw");
+	DX12BindingRecordDrawInstanced(commandList, vertexCountPerInstance, instanceCount,
+		startVertexLocation, startInstanceLocation);
 	gOrigDrawInstanced(commandList, vertexCountPerInstance, instanceCount,
 		startVertexLocation, startInstanceLocation);
 }
@@ -145,7 +155,8 @@ static void STDMETHODCALLTYPE HookedDrawIndexedInstanced(
 	ID3D12GraphicsCommandList *commandList, UINT indexCountPerInstance, UINT instanceCount,
 	UINT startIndexLocation, INT baseVertexLocation, UINT startInstanceLocation)
 {
-	DX12BindingRecordDraw(commandList, "draw_indexed");
+	DX12BindingRecordDrawIndexedInstanced(commandList, indexCountPerInstance, instanceCount,
+		startIndexLocation, baseVertexLocation, startInstanceLocation);
 	gOrigDrawIndexedInstanced(commandList, indexCountPerInstance, instanceCount,
 		startIndexLocation, baseVertexLocation, startInstanceLocation);
 }
@@ -154,8 +165,30 @@ static void STDMETHODCALLTYPE HookedDispatch(
 	ID3D12GraphicsCommandList *commandList, UINT threadGroupCountX,
 	UINT threadGroupCountY, UINT threadGroupCountZ)
 {
-	DX12BindingRecordDispatch(commandList);
+	DX12BindingRecordDispatch(commandList, threadGroupCountX, threadGroupCountY, threadGroupCountZ);
 	gOrigDispatch(commandList, threadGroupCountX, threadGroupCountY, threadGroupCountZ);
+}
+
+static void STDMETHODCALLTYPE HookedIASetPrimitiveTopology(
+	ID3D12GraphicsCommandList *commandList, D3D12_PRIMITIVE_TOPOLOGY topology)
+{
+	DX12BindingSetPrimitiveTopology(commandList, topology);
+	gOrigIASetPrimitiveTopology(commandList, topology);
+}
+
+static void STDMETHODCALLTYPE HookedIASetIndexBuffer(
+	ID3D12GraphicsCommandList *commandList, const D3D12_INDEX_BUFFER_VIEW *view)
+{
+	DX12BindingSetIndexBuffer(commandList, view);
+	gOrigIASetIndexBuffer(commandList, view);
+}
+
+static void STDMETHODCALLTYPE HookedIASetVertexBuffers(
+	ID3D12GraphicsCommandList *commandList, UINT startSlot, UINT count,
+	const D3D12_VERTEX_BUFFER_VIEW *views)
+{
+	DX12BindingSetVertexBuffers(commandList, startSlot, count, views);
+	gOrigIASetVertexBuffers(commandList, startSlot, count, views);
 }
 
 void DX12HookCommandList(IUnknown *commandList)
@@ -183,6 +216,24 @@ void DX12HookCommandList(IUnknown *commandList)
 		DX12HookFunction(reinterpret_cast<void**>(&gOrigSetGraphicsRootDescriptorTable),
 			vtable[32], HookedSetGraphicsRootDescriptorTable,
 			"ID3D12GraphicsCommandList::SetGraphicsRootDescriptorTable");
+		DX12HookFunction(reinterpret_cast<void**>(&gOrigIASetPrimitiveTopology),
+			vtable[20], HookedIASetPrimitiveTopology,
+			"ID3D12GraphicsCommandList::IASetPrimitiveTopology");
+		DX12HookFunction(reinterpret_cast<void**>(&gOrigIASetIndexBuffer),
+			vtable[43], HookedIASetIndexBuffer,
+			"ID3D12GraphicsCommandList::IASetIndexBuffer");
+		DX12HookFunction(reinterpret_cast<void**>(&gOrigIASetVertexBuffers),
+			vtable[44], HookedIASetVertexBuffers,
+			"ID3D12GraphicsCommandList::IASetVertexBuffers");
+		DX12HookFunction(reinterpret_cast<void**>(&gOrigDrawInstanced),
+			vtable[12], HookedDrawInstanced,
+			"ID3D12GraphicsCommandList::DrawInstanced");
+		DX12HookFunction(reinterpret_cast<void**>(&gOrigDrawIndexedInstanced),
+			vtable[13], HookedDrawIndexedInstanced,
+			"ID3D12GraphicsCommandList::DrawIndexedInstanced");
+		DX12HookFunction(reinterpret_cast<void**>(&gOrigDispatch),
+			vtable[14], HookedDispatch,
+			"ID3D12GraphicsCommandList::Dispatch");
 	}
 	baseList->Release();
 }

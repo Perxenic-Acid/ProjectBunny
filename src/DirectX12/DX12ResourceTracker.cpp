@@ -1119,6 +1119,43 @@ void DX12RecordResourceBarrier(UINT numBarriers, const D3D12_RESOURCE_BARRIER *b
 	ReleaseSRWLockExclusive(&gResourceLock);
 }
 
+bool DX12ResolveBufferResourceByGpuVa(
+	UINT64 gpuVirtualAddress, UINT64 size, DX12BufferResourceSummary *summary)
+{
+	if (!summary || gpuVirtualAddress == 0)
+		return false;
+
+	*summary = DX12BufferResourceSummary();
+	bool resolved = false;
+	AcquireSRWLockShared(&gResourceLock);
+	for (const ResourceRecord &resource : gResources) {
+		if (resource.desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER ||
+			resource.gpuVirtualAddress == 0 || resource.size == 0)
+			continue;
+		const UINT64 begin = resource.gpuVirtualAddress;
+		const UINT64 end = begin + resource.size;
+		const UINT64 requestedEnd = gpuVirtualAddress + size;
+		if (gpuVirtualAddress >= begin && requestedEnd <= end) {
+			summary->resource = resource.resource;
+			summary->resourceDesc = resource.desc;
+			summary->hasResourceDesc = true;
+			summary->gpuVirtualAddress = resource.gpuVirtualAddress;
+			summary->resourceOffset = gpuVirtualAddress - begin;
+			summary->viewSize = size;
+			if (resource.hasHeapType) {
+				summary->resourceHeapType = static_cast<UINT>(resource.heapType);
+				summary->hasResourceHeapType = true;
+			}
+			summary->currentState = static_cast<UINT>(resource.currentState);
+			summary->hasCurrentState = resource.hasCurrentState;
+			resolved = true;
+			break;
+		}
+	}
+	ReleaseSRWLockShared(&gResourceLock);
+	return resolved;
+}
+
 static void FillDescriptorSummary(DX12DescriptorSummary *summary, const DescriptorRecord &record)
 {
 	if (!summary)

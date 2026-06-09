@@ -38,8 +38,23 @@ void DX12BindingSetGraphicsRootDescriptorTable(
 void DX12BindingSetComputeRootDescriptorTable(
 	ID3D12GraphicsCommandList *commandList, UINT rootParameterIndex,
 	D3D12_GPU_DESCRIPTOR_HANDLE baseDescriptor);
-void DX12BindingRecordDraw(ID3D12GraphicsCommandList *commandList, const char *kind);
-void DX12BindingRecordDispatch(ID3D12GraphicsCommandList *commandList);
+void DX12BindingSetPrimitiveTopology(
+	ID3D12GraphicsCommandList *commandList, D3D12_PRIMITIVE_TOPOLOGY topology);
+void DX12BindingSetIndexBuffer(
+	ID3D12GraphicsCommandList *commandList, const D3D12_INDEX_BUFFER_VIEW *view);
+void DX12BindingSetVertexBuffers(
+	ID3D12GraphicsCommandList *commandList, UINT startSlot, UINT count,
+	const D3D12_VERTEX_BUFFER_VIEW *views);
+void DX12BindingRecordDrawInstanced(
+	ID3D12GraphicsCommandList *commandList, UINT vertexCountPerInstance,
+	UINT instanceCount, UINT startVertexLocation, UINT startInstanceLocation);
+void DX12BindingRecordDrawIndexedInstanced(
+	ID3D12GraphicsCommandList *commandList, UINT indexCountPerInstance,
+	UINT instanceCount, UINT startIndexLocation, INT baseVertexLocation,
+	UINT startInstanceLocation);
+void DX12BindingRecordDispatch(
+	ID3D12GraphicsCommandList *commandList, UINT threadGroupCountX,
+	UINT threadGroupCountY, UINT threadGroupCountZ);
 void DX12BindingBeginFrame();
 void DX12GetCurrentFrameResourceBindings(std::vector<DX12FrameResourceBinding> *bindings);
 void DX12DumpBindingTrace(const wchar_t *dir);

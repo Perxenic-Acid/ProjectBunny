@@ -60,11 +60,27 @@ struct DX12PsoRootSummary
 	ID3D12RootSignature *rootSignature = nullptr;
 };
 
+struct DX12BufferResourceSummary
+{
+	ID3D12Resource *resource = nullptr;
+	D3D12_RESOURCE_DESC resourceDesc = {};
+	bool hasResourceDesc = false;
+	UINT resourceHeapType = 0;
+	bool hasResourceHeapType = false;
+	UINT64 gpuVirtualAddress = 0;
+	UINT64 resourceOffset = 0;
+	UINT64 viewSize = 0;
+	UINT currentState = 0;
+	bool hasCurrentState = false;
+};
+
 void DX12HookResourceMetadata(ID3D12Device *device);
 void DX12RecordPsoRootSignature(
 	UINT64 psoIndex, const char *kind, ID3D12PipelineState *pipelineState,
 	ID3D12RootSignature *rootSignature);
 void DX12RecordResourceBarrier(UINT numBarriers, const D3D12_RESOURCE_BARRIER *barriers);
+bool DX12ResolveBufferResourceByGpuVa(
+	UINT64 gpuVirtualAddress, UINT64 size, DX12BufferResourceSummary *summary);
 void DX12GetResourceMetadataSnapshot(
 	std::vector<DX12RootSignatureSummary> *rootSignatures,
 	std::vector<DX12DescriptorSummary> *descriptors,

@@ -1,6 +1,7 @@
 #include "DX12BindingTracker.h"
 
 #include <stdio.h>
+#include <string.h>
 
 #include <unordered_set>
 #include <string>
@@ -12,6 +13,7 @@
 #include "DX12State.h"
 
 static constexpr UINT MaxRootParameters = 64;
+static constexpr UINT MaxVertexBufferSlots = 32;
 static constexpr UINT MaxTrackedEvents = 20000;
 
 struct RootTableState
@@ -28,6 +30,11 @@ struct CommandListBindingState
 	ID3D12DescriptorHeap *samplerHeap = nullptr;
 	RootTableState graphicsTables[MaxRootParameters] = {};
 	RootTableState computeTables[MaxRootParameters] = {};
+	D3D12_VERTEX_BUFFER_VIEW vertexBuffers[MaxVertexBufferSlots] = {};
+	bool vertexBufferValid[MaxVertexBufferSlots] = {};
+	D3D12_INDEX_BUFFER_VIEW indexBuffer = {};
+	bool indexBufferValid = false;
+	D3D12_PRIMITIVE_TOPOLOGY primitiveTopology = D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
 	UINT64 drawSerial = 0;
 	UINT64 dispatchSerial = 0;
 };
@@ -36,6 +43,8 @@ struct BindingEvent
 {
 	UINT64 serial = 0;
 	std::string kind;
+	UINT64 drawId = 0;
+	UINT64 dispatchId = 0;
 	ID3D12GraphicsCommandList *commandList = nullptr;
 	ID3D12PipelineState *pipelineState = nullptr;
 	DX12PsoShaderInfo shaderInfo = {};
@@ -43,6 +52,21 @@ struct BindingEvent
 	ID3D12DescriptorHeap *samplerHeap = nullptr;
 	RootTableState graphicsTables[MaxRootParameters] = {};
 	RootTableState computeTables[MaxRootParameters] = {};
+	D3D12_VERTEX_BUFFER_VIEW vertexBuffers[MaxVertexBufferSlots] = {};
+	bool vertexBufferValid[MaxVertexBufferSlots] = {};
+	D3D12_INDEX_BUFFER_VIEW indexBuffer = {};
+	bool indexBufferValid = false;
+	D3D12_PRIMITIVE_TOPOLOGY primitiveTopology = D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
+	UINT vertexCountPerInstance = 0;
+	UINT indexCountPerInstance = 0;
+	UINT instanceCount = 0;
+	UINT startVertexLocation = 0;
+	UINT startIndexLocation = 0;
+	INT baseVertexLocation = 0;
+	UINT startInstanceLocation = 0;
+	UINT threadGroupCountX = 0;
+	UINT threadGroupCountY = 0;
+	UINT threadGroupCountZ = 0;
 };
 
 static SRWLOCK gBindingLock = SRWLOCK_INIT;
@@ -63,12 +87,19 @@ static void StoreEventLocked(
 	BindingEvent event;
 	event.serial = ++gEventSerial;
 	event.kind = kind ? kind : "";
+	event.drawId = state.drawSerial;
+	event.dispatchId = state.dispatchSerial;
 	event.commandList = commandList;
 	event.pipelineState = state.pipelineState;
 	event.cbvSrvUavHeap = state.cbvSrvUavHeap;
 	event.samplerHeap = state.samplerHeap;
 	memcpy(event.graphicsTables, state.graphicsTables, sizeof(event.graphicsTables));
 	memcpy(event.computeTables, state.computeTables, sizeof(event.computeTables));
+	memcpy(event.vertexBuffers, state.vertexBuffers, sizeof(event.vertexBuffers));
+	memcpy(event.vertexBufferValid, state.vertexBufferValid, sizeof(event.vertexBufferValid));
+	event.indexBuffer = state.indexBuffer;
+	event.indexBufferValid = state.indexBufferValid;
+	event.primitiveTopology = state.primitiveTopology;
 	if (state.pipelineState)
 		DX12GetPipelineStateShaderInfo(state.pipelineState, &event.shaderInfo);
 	gEvents.push_back(event);
@@ -173,7 +204,60 @@ void DX12BindingSetComputeRootDescriptorTable(
 	ReleaseSRWLockExclusive(&gBindingLock);
 }
 
-void DX12BindingRecordDraw(ID3D12GraphicsCommandList *commandList, const char *kind)
+void DX12BindingSetPrimitiveTopology(
+	ID3D12GraphicsCommandList *commandList, D3D12_PRIMITIVE_TOPOLOGY topology)
+{
+	if (!commandList)
+		return;
+
+	AcquireSRWLockExclusive(&gBindingLock);
+	gCommandLists[commandList].primitiveTopology = topology;
+	ReleaseSRWLockExclusive(&gBindingLock);
+}
+
+void DX12BindingSetIndexBuffer(
+	ID3D12GraphicsCommandList *commandList, const D3D12_INDEX_BUFFER_VIEW *view)
+{
+	if (!commandList)
+		return;
+
+	AcquireSRWLockExclusive(&gBindingLock);
+	CommandListBindingState &state = gCommandLists[commandList];
+	if (view) {
+		state.indexBuffer = *view;
+		state.indexBufferValid = true;
+	} else {
+		state.indexBuffer = {};
+		state.indexBufferValid = false;
+	}
+	ReleaseSRWLockExclusive(&gBindingLock);
+}
+
+void DX12BindingSetVertexBuffers(
+	ID3D12GraphicsCommandList *commandList, UINT startSlot, UINT count,
+	const D3D12_VERTEX_BUFFER_VIEW *views)
+{
+	if (!commandList || startSlot >= MaxVertexBufferSlots)
+		return;
+
+	AcquireSRWLockExclusive(&gBindingLock);
+	CommandListBindingState &state = gCommandLists[commandList];
+	for (UINT i = 0; i < count && startSlot + i < MaxVertexBufferSlots; ++i) {
+		const UINT slot = startSlot + i;
+		if (views) {
+			state.vertexBuffers[slot] = views[i];
+			state.vertexBufferValid[slot] = views[i].BufferLocation != 0 && views[i].SizeInBytes != 0;
+		} else {
+			state.vertexBuffers[slot] = {};
+			state.vertexBufferValid[slot] = false;
+		}
+	}
+	ReleaseSRWLockExclusive(&gBindingLock);
+}
+
+void DX12BindingRecordDrawInstanced(
+	ID3D12GraphicsCommandList *commandList, UINT vertexCountPerInstance,
+	UINT instanceCount, UINT startVertexLocation, UINT startInstanceLocation)
 {
 	if (!commandList)
 		return;
@@ -181,11 +265,45 @@ void DX12BindingRecordDraw(ID3D12GraphicsCommandList *commandList, const char *k
 	AcquireSRWLockExclusive(&gBindingLock);
 	CommandListBindingState &state = gCommandLists[commandList];
 	state.drawSerial++;
-	StoreEventLocked(kind ? kind : "draw", commandList, state);
+	const size_t before = gEvents.size();
+	StoreEventLocked("draw", commandList, state);
+	if (gEvents.size() > before) {
+		BindingEvent &event = gEvents.back();
+		event.vertexCountPerInstance = vertexCountPerInstance;
+		event.instanceCount = instanceCount;
+		event.startVertexLocation = startVertexLocation;
+		event.startInstanceLocation = startInstanceLocation;
+	}
 	ReleaseSRWLockExclusive(&gBindingLock);
 }
 
-void DX12BindingRecordDispatch(ID3D12GraphicsCommandList *commandList)
+void DX12BindingRecordDrawIndexedInstanced(
+	ID3D12GraphicsCommandList *commandList, UINT indexCountPerInstance,
+	UINT instanceCount, UINT startIndexLocation, INT baseVertexLocation,
+	UINT startInstanceLocation)
+{
+	if (!commandList)
+		return;
+
+	AcquireSRWLockExclusive(&gBindingLock);
+	CommandListBindingState &state = gCommandLists[commandList];
+	state.drawSerial++;
+	const size_t before = gEvents.size();
+	StoreEventLocked("draw_indexed", commandList, state);
+	if (gEvents.size() > before) {
+		BindingEvent &event = gEvents.back();
+		event.indexCountPerInstance = indexCountPerInstance;
+		event.instanceCount = instanceCount;
+		event.startIndexLocation = startIndexLocation;
+		event.baseVertexLocation = baseVertexLocation;
+		event.startInstanceLocation = startInstanceLocation;
+	}
+	ReleaseSRWLockExclusive(&gBindingLock);
+}
+
+void DX12BindingRecordDispatch(
+	ID3D12GraphicsCommandList *commandList, UINT threadGroupCountX,
+	UINT threadGroupCountY, UINT threadGroupCountZ)
 {
 	if (!commandList)
 		return;
@@ -193,7 +311,14 @@ void DX12BindingRecordDispatch(ID3D12GraphicsCommandList *commandList)
 	AcquireSRWLockExclusive(&gBindingLock);
 	CommandListBindingState &state = gCommandLists[commandList];
 	state.dispatchSerial++;
+	const size_t before = gEvents.size();
 	StoreEventLocked("dispatch", commandList, state);
+	if (gEvents.size() > before) {
+		BindingEvent &event = gEvents.back();
+		event.threadGroupCountX = threadGroupCountX;
+		event.threadGroupCountY = threadGroupCountY;
+		event.threadGroupCountZ = threadGroupCountZ;
+	}
 	ReleaseSRWLockExclusive(&gBindingLock);
 }
 
@@ -238,6 +363,76 @@ static void WriteRootTables(FILE *file, const RootTableState *tables)
 	}
 }
 
+static void WriteVertexBufferSlots(FILE *file, const BindingEvent &event)
+{
+	bool first = true;
+	for (UINT slot = 0; slot < MaxVertexBufferSlots; ++slot) {
+		if (!event.vertexBufferValid[slot])
+			continue;
+		const D3D12_VERTEX_BUFFER_VIEW &view = event.vertexBuffers[slot];
+		if (!first)
+			fprintf(file, ";");
+		fprintf(file, "%u:0x%llx:%u:%u",
+			slot,
+			static_cast<unsigned long long>(view.BufferLocation),
+			view.SizeInBytes,
+			view.StrideInBytes);
+		first = false;
+	}
+}
+
+static const DX12DescriptorHeapSummary *FindHeapForGpuHandle(
+	const std::vector<DX12DescriptorHeapSummary> &heaps,
+	const RootTableState &table,
+	UINT requiredType);
+static const DX12DescriptorSummary *FindDescriptorByCpuHandle(
+	const std::vector<DX12DescriptorSummary> &descriptors, SIZE_T cpuHandle);
+
+static std::string ResourceRefsForEvent(
+	const BindingEvent &event,
+	const std::vector<DX12DescriptorHeapSummary> &heaps,
+	const std::vector<DX12DescriptorSummary> &descriptors)
+{
+	std::string refs;
+	std::unordered_set<std::string> seen;
+	for (UINT i = 0; i < MaxRootParameters; ++i) {
+		struct TableRef {
+			const char *space;
+			const RootTableState &table;
+			UINT heapType;
+		};
+		const TableRef tables[] = {
+			{ "g", event.graphicsTables[i], D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV },
+			{ "gs", event.graphicsTables[i], D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER },
+			{ "c", event.computeTables[i], D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV },
+			{ "cs", event.computeTables[i], D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER },
+		};
+		for (const TableRef &entry : tables) {
+			if (!entry.table.valid)
+				continue;
+			const DX12DescriptorHeapSummary *heap =
+				FindHeapForGpuHandle(heaps, entry.table, entry.heapType);
+			if (!heap)
+				continue;
+			const UINT64 descriptorIndex = (entry.table.baseDescriptor.ptr - heap->gpuStart) / heap->increment;
+			const SIZE_T cpuHandle = heap->cpuStart + static_cast<SIZE_T>(descriptorIndex) * heap->increment;
+			const DX12DescriptorSummary *descriptor = FindDescriptorByCpuHandle(descriptors, cpuHandle);
+			char key[128];
+			sprintf_s(key, "%s%u:%llu:%p",
+				entry.space,
+				entry.table.rootParameterIndex,
+				static_cast<unsigned long long>(descriptorIndex),
+				descriptor ? descriptor->resource : nullptr);
+			if (!seen.insert(key).second)
+				continue;
+			if (!refs.empty())
+				refs += ";";
+			refs += key;
+		}
+	}
+	return refs;
+}
+
 static const char *HeapTypeName(UINT type)
 {
 	switch (type) {
@@ -267,6 +462,267 @@ static const char *ResourceDimensionName(D3D12_RESOURCE_DIMENSION dimension)
 		return "TEXTURE3D";
 	default:
 		return "UNKNOWN";
+	}
+}
+
+static const char *TopologyName(D3D12_PRIMITIVE_TOPOLOGY topology)
+{
+	switch (topology) {
+	case D3D_PRIMITIVE_TOPOLOGY_POINTLIST:
+		return "POINTLIST";
+	case D3D_PRIMITIVE_TOPOLOGY_LINELIST:
+		return "LINELIST";
+	case D3D_PRIMITIVE_TOPOLOGY_LINESTRIP:
+		return "LINESTRIP";
+	case D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST:
+		return "TRIANGLELIST";
+	case D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP:
+		return "TRIANGLESTRIP";
+	default:
+		return "UNKNOWN";
+	}
+}
+
+static bool IsDrawEvent(const BindingEvent &event)
+{
+	return event.kind == "draw" || event.kind == "draw_indexed";
+}
+
+static bool IsDispatchEvent(const BindingEvent &event)
+{
+	return event.kind == "dispatch";
+}
+
+struct FlatBufferRow
+{
+	std::string id;
+	std::string role;
+	UINT64 gpuVa = 0;
+	UINT64 size = 0;
+	UINT stride = 0;
+	UINT slot = 0;
+	UINT format = 0;
+	bool resolved = false;
+	DX12BufferResourceSummary resource = {};
+};
+
+static std::string MakeBufferKey(
+	const char *role, UINT64 gpuVa, UINT64 size, UINT stride, UINT slot, UINT format)
+{
+	char key[128];
+	sprintf_s(key, "%s|%llx|%llu|%u|%u|%u",
+		role ? role : "",
+		static_cast<unsigned long long>(gpuVa),
+		static_cast<unsigned long long>(size),
+		stride,
+		slot,
+		format);
+	return key;
+}
+
+static std::string NextBufferId(const char *prefix, UINT *nextId)
+{
+	char id[32];
+	const UINT value = nextId ? ++(*nextId) : 0;
+	sprintf_s(id, "%s_%u", prefix ? prefix : "buf", value);
+	return id;
+}
+
+static const FlatBufferRow *GetOrAddBufferRow(
+	std::vector<FlatBufferRow> *rows, std::unordered_map<std::string, size_t> *rowByKey,
+	UINT *nextVbId, UINT *nextIbId, const char *role, UINT64 gpuVa, UINT64 size,
+	UINT stride, UINT slot, UINT format)
+{
+	if (!rows || !rowByKey || gpuVa == 0 || size == 0)
+		return nullptr;
+
+	std::string key = MakeBufferKey(role, gpuVa, size, stride, slot, format);
+	auto found = rowByKey->find(key);
+	if (found != rowByKey->end() && found->second < rows->size())
+		return &(*rows)[found->second];
+
+	FlatBufferRow row;
+	row.id = NextBufferId(role && !strcmp(role, "IB") ? "ib" : "vb",
+		role && !strcmp(role, "IB") ? nextIbId : nextVbId);
+	row.role = role ? role : "";
+	row.gpuVa = gpuVa;
+	row.size = size;
+	row.stride = stride;
+	row.slot = slot;
+	row.format = format;
+	row.resolved = DX12ResolveBufferResourceByGpuVa(gpuVa, size, &row.resource);
+	(*rowByKey)[key] = rows->size();
+	rows->push_back(row);
+	return &rows->back();
+}
+
+static std::string BufferIdsForEvent(
+	const BindingEvent &event, std::vector<FlatBufferRow> *rows,
+	std::unordered_map<std::string, size_t> *rowByKey, UINT *nextVbId, UINT *nextIbId)
+{
+	std::string ids;
+	for (UINT slot = 0; slot < MaxVertexBufferSlots; ++slot) {
+		if (!event.vertexBufferValid[slot])
+			continue;
+		const D3D12_VERTEX_BUFFER_VIEW &view = event.vertexBuffers[slot];
+		const FlatBufferRow *row = GetOrAddBufferRow(rows, rowByKey, nextVbId, nextIbId,
+			"VB", view.BufferLocation, view.SizeInBytes, view.StrideInBytes, slot, 0);
+		if (!row)
+			continue;
+		if (!ids.empty())
+			ids += ";";
+		char item[64];
+		sprintf_s(item, "%u:%s", slot, row->id.c_str());
+		ids += item;
+	}
+	return ids;
+}
+
+static std::string IndexBufferIdForEvent(
+	const BindingEvent &event, std::vector<FlatBufferRow> *rows,
+	std::unordered_map<std::string, size_t> *rowByKey, UINT *nextVbId, UINT *nextIbId)
+{
+	if (!event.indexBufferValid || event.indexBuffer.BufferLocation == 0 ||
+		event.indexBuffer.SizeInBytes == 0)
+		return "";
+
+	const FlatBufferRow *row = GetOrAddBufferRow(rows, rowByKey, nextVbId, nextIbId,
+		"IB", event.indexBuffer.BufferLocation, event.indexBuffer.SizeInBytes, 0, 0,
+		static_cast<UINT>(event.indexBuffer.Format));
+	return row ? row->id : "";
+}
+
+static void WriteOptionalHash(FILE *file, bool hasHash, UINT64 hash)
+{
+	if (hasHash)
+		fprintf(file, "%016llx", static_cast<unsigned long long>(hash));
+}
+
+static void WriteFlatFrameAnalysisFiles(
+	const wchar_t *dir, const std::vector<BindingEvent> &events, UINT64 droppedEvents)
+{
+	if (!dir)
+		return;
+
+	std::vector<DX12DescriptorSummary> descriptors;
+	std::vector<DX12DescriptorHeapSummary> heaps;
+	DX12GetResourceMetadataSnapshot(nullptr, &descriptors, nullptr, &heaps);
+
+	std::vector<FlatBufferRow> buffers;
+	std::unordered_map<std::string, size_t> bufferByKey;
+	UINT nextVbId = 0;
+	UINT nextIbId = 0;
+	size_t drawRows = 0;
+	size_t dispatchRows = 0;
+
+	wchar_t drawPath[MAX_PATH];
+	swprintf_s(drawPath, L"%s\\DrawCallsDX12.csv", dir);
+	FILE *drawFile = _wfsopen(drawPath, L"w", _SH_DENYNO);
+	if (drawFile) {
+		fprintf(drawFile,
+			"draw_id,dispatch_id,type,serial,command_list,pipeline_state,pso,vs,ps,cs,topology,"
+			"vertex_count,index_count,start_vertex,start_index,base_vertex,instance_count,start_instance,"
+			"groups_x,groups_y,groups_z,vb_slots,ib_resource,resource_refs\n");
+		for (const BindingEvent &event : events) {
+			if (!IsDrawEvent(event) && !IsDispatchEvent(event))
+				continue;
+
+			std::string vbSlots = BufferIdsForEvent(
+				event, &buffers, &bufferByKey, &nextVbId, &nextIbId);
+			std::string ibResource = IndexBufferIdForEvent(
+				event, &buffers, &bufferByKey, &nextVbId, &nextIbId);
+			std::string resourceRefs = ResourceRefsForEvent(event, heaps, descriptors);
+
+			if (IsDrawEvent(event))
+				drawRows++;
+			else
+				dispatchRows++;
+
+			fprintf(drawFile, "%llu,%llu,%s,%llu,%p,%p,%llu,",
+				static_cast<unsigned long long>(event.drawId),
+				static_cast<unsigned long long>(event.dispatchId),
+				event.kind.c_str(),
+				static_cast<unsigned long long>(event.serial),
+				event.commandList,
+				event.pipelineState,
+				static_cast<unsigned long long>(event.shaderInfo.psoIndex));
+			WriteOptionalHash(drawFile, event.shaderInfo.hasVS, event.shaderInfo.vs);
+			fprintf(drawFile, ",");
+			WriteOptionalHash(drawFile, event.shaderInfo.hasPS, event.shaderInfo.ps);
+			fprintf(drawFile, ",");
+			WriteOptionalHash(drawFile, event.shaderInfo.hasCS, event.shaderInfo.cs);
+			fprintf(drawFile,
+				",%s,%u,%u,%u,%u,%d,%u,%u,%u,%u,%u,%s,%s,%s\n",
+				TopologyName(event.primitiveTopology),
+				event.vertexCountPerInstance,
+				event.indexCountPerInstance,
+				event.startVertexLocation,
+				event.startIndexLocation,
+				event.baseVertexLocation,
+				event.instanceCount,
+				event.startInstanceLocation,
+				event.threadGroupCountX,
+				event.threadGroupCountY,
+				event.threadGroupCountZ,
+				vbSlots.c_str(),
+				ibResource.c_str(),
+				resourceRefs.c_str());
+		}
+		fclose(drawFile);
+		DX12Log("Draw call CSV written: %S draws=%zu dispatches=%zu buffers=%zu\n",
+			drawPath, drawRows, dispatchRows, buffers.size());
+	}
+
+	wchar_t bufferPath[MAX_PATH];
+	swprintf_s(bufferPath, L"%s\\BuffersDX12.csv", dir);
+	FILE *bufferFile = _wfsopen(bufferPath, L"w", _SH_DENYNO);
+	if (bufferFile) {
+		fprintf(bufferFile,
+			"buffer_id,role,resource,file,gpu_va,resource_gpu_va,offset,size,stride,slot,format,"
+			"resolved,current_state,has_current_state,heap_type,resource_size\n");
+		for (const FlatBufferRow &row : buffers) {
+			UINT64 resourceSize = row.resource.hasResourceDesc ? row.resource.resourceDesc.Width : 0;
+			fprintf(bufferFile,
+				"%s,%s,%p,,0x%llx,0x%llx,%llu,%llu,%u,%u,%u,%u,0x%x,%u,%u,%llu\n",
+				row.id.c_str(),
+				row.role.c_str(),
+				row.resolved ? row.resource.resource : nullptr,
+				static_cast<unsigned long long>(row.gpuVa),
+				static_cast<unsigned long long>(row.resolved ? row.resource.gpuVirtualAddress : 0),
+				static_cast<unsigned long long>(row.resolved ? row.resource.resourceOffset : 0),
+				static_cast<unsigned long long>(row.size),
+				row.stride,
+				row.slot,
+				row.format,
+				row.resolved ? 1 : 0,
+				row.resolved ? row.resource.currentState : 0,
+				row.resolved && row.resource.hasCurrentState ? 1 : 0,
+				row.resolved && row.resource.hasResourceHeapType ? row.resource.resourceHeapType : 0,
+				static_cast<unsigned long long>(resourceSize));
+		}
+		fclose(bufferFile);
+		DX12Log("Buffer CSV written: %S rows=%zu\n", bufferPath, buffers.size());
+	}
+
+	wchar_t framePath[MAX_PATH];
+	swprintf_s(framePath, L"%s\\FrameAnalysisDX12.csv", dir);
+	FILE *frameFile = _wfsopen(framePath, L"w", _SH_DENYNO);
+	if (frameFile) {
+		fprintf(frameFile,
+			"events,dropped,max_events,draw_rows,dispatch_rows,descriptor_heaps,descriptors,buffers,"
+			"draw_calls_csv,buffers_csv,current_frame_resources,current_frame_resource_files\n");
+		fprintf(frameFile, "%zu,%llu,%u,%zu,%zu,%zu,%zu,%zu,DrawCallsDX12.csv,BuffersDX12.csv,CurrentFrameResourcesDX12.txt,CurrentFrameResourceFilesDX12.txt\n",
+			events.size(),
+			static_cast<unsigned long long>(droppedEvents),
+			MaxTrackedEvents,
+			drawRows,
+			dispatchRows,
+			heaps.size(),
+			descriptors.size(),
+			buffers.size());
+		fclose(frameFile);
+		DX12Log("Frame analysis CSV written: %S events=%zu buffers=%zu\n",
+			framePath, events.size(), buffers.size());
 	}
 }
 
@@ -531,14 +987,38 @@ void DX12DumpBindingTrace(const wchar_t *dir)
 		MaxTrackedEvents);
 
 	fprintf(file,
-		"serial,kind,command_list,pipeline_state,pso,vs,ps,cs,cbv_srv_uav_heap,sampler_heap,graphics_tables,compute_tables\n");
+		"serial,kind,draw_id,dispatch_id,command_list,pipeline_state,pso,vs,ps,cs,topology,vertex_count,index_count,start_vertex,start_index,base_vertex,instance_count,start_instance,groups_x,groups_y,groups_z,vb_slots,ib_gpu_va,ib_size,ib_format,cbv_srv_uav_heap,sampler_heap,graphics_tables,compute_tables\n");
 	for (const BindingEvent &event : events) {
-		fprintf(file, "%llu,%s,%p,%p,",
+		fprintf(file, "%llu,%s,%llu,%llu,%p,%p,",
 			static_cast<unsigned long long>(event.serial),
 			event.kind.c_str(),
+			static_cast<unsigned long long>(event.drawId),
+			static_cast<unsigned long long>(event.dispatchId),
 			event.commandList,
 			event.pipelineState);
 		WriteShaderInfo(file, event.shaderInfo);
+		fprintf(file, ",%s,%u,%u,%u,%u,%d,%u,%u,%u,%u,%u,",
+			TopologyName(event.primitiveTopology),
+			event.vertexCountPerInstance,
+			event.indexCountPerInstance,
+			event.startVertexLocation,
+			event.startIndexLocation,
+			event.baseVertexLocation,
+			event.instanceCount,
+			event.startInstanceLocation,
+			event.threadGroupCountX,
+			event.threadGroupCountY,
+			event.threadGroupCountZ);
+		WriteVertexBufferSlots(file, event);
+		fprintf(file, ",");
+		if (event.indexBufferValid) {
+			fprintf(file, "0x%llx,%u,%u",
+				static_cast<unsigned long long>(event.indexBuffer.BufferLocation),
+				event.indexBuffer.SizeInBytes,
+				static_cast<UINT>(event.indexBuffer.Format));
+		} else {
+			fprintf(file, ",,");
+		}
 		fprintf(file, ",%p,%p,",
 			event.cbvSrvUavHeap,
 			event.samplerHeap);
@@ -551,5 +1031,6 @@ void DX12DumpBindingTrace(const wchar_t *dir)
 	fclose(file);
 	DX12Log("Current-frame binding trace written: %S events=%zu dropped=%llu\n",
 		path, events.size(), static_cast<unsigned long long>(droppedEvents));
+	WriteFlatFrameAnalysisFiles(dir, events, droppedEvents);
 	WriteFrameResourceFile(dir, events);
 }
