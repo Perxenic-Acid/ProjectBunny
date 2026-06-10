@@ -79,10 +79,12 @@ foreach ($f in $files) {
 }
 
 if ($Platform -eq 'x64') {
-    $dx12TestDir = "D:\Softs\Steam\steamapps\common\Slay the Spire 2"
+    $dx12GameRoot = "C:\SteamLibrary\steamapps\common\StellarBladeDemo"
+    $dx12TestDir = Join-Path $dx12GameRoot "SB\Binaries\Win64"
+    $dx12Exe = Join-Path $dx12GameRoot "SB.exe"
     $dx12Dll = "$outDir\d3d12.dll"
-    if ((Test-Path $dx12Dll) -and (Test-Path $dx12TestDir)) {
-        $dx12Processes = Get-Process -Name "SlayTheSpire2" -ErrorAction SilentlyContinue
+    if ((Test-Path $dx12Dll) -and (Test-Path $dx12Exe) -and (Test-Path $dx12TestDir)) {
+        $dx12Processes = Get-Process -Name "SB-Win64-Shipping" -ErrorAction SilentlyContinue
         if ($dx12Processes) {
             Write-Host "  Stopping running DX12 test game before DLL copy..." -ForegroundColor Gray
             $dx12Processes | Stop-Process -Force
@@ -110,9 +112,11 @@ if ($Platform -eq 'x64') {
         Copy-Item $dx12Dll "$dx12TestDir\d3d12.dll" -Force
         Write-Host "  Copied DX12 test DLL: $dx12TestDir\d3d12.dll" -ForegroundColor Gray
 
-        $dx12SteamUri = "steam://run/2868840"
+        $dx12SteamUri = "steam://run/3564860"
         Start-Process $dx12SteamUri
         Write-Host "  Launched DX12 test game via Steam: $dx12SteamUri" -ForegroundColor Gray
+    } elseif (-not (Test-Path $dx12Exe)) {
+        Write-Host "  Skipped DX12 test DLL copy: executable not found: $dx12Exe" -ForegroundColor Yellow
     } elseif (-not (Test-Path $dx12TestDir)) {
         Write-Host "  Skipped DX12 test DLL copy: directory not found: $dx12TestDir" -ForegroundColor Yellow
     }

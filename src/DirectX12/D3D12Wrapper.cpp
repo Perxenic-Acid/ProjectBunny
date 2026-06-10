@@ -10,6 +10,8 @@
 static HMODULE gRealD3D12 = nullptr;
 static bool gInitialized = false;
 
+static HMODULE LoadRealD3D12();
+
 typedef HRESULT(WINAPI *PFN_D3D12_CREATE_DEVICE_LOCAL)(
 	IUnknown*, D3D_FEATURE_LEVEL, REFIID, void**);
 typedef HRESULT(WINAPI *PFN_D3D12_GET_DEBUG_INTERFACE_LOCAL)(REFIID, void**);
@@ -24,6 +26,9 @@ typedef HRESULT(WINAPI *PFN_D3D12_CREATE_VERSIONED_ROOT_SIGNATURE_DESERIALIZER_L
 typedef HRESULT(WINAPI *PFN_D3D12_ENABLE_EXPERIMENTAL_FEATURES_LOCAL)(
 	UINT, const IID*, void*, UINT*);
 typedef HRESULT(WINAPI *PFN_D3D12_GET_INTERFACE_LOCAL)(REFCLSID, REFIID, void**);
+typedef UINT_PTR(WINAPI *PFN_D3D12_GENERIC_LOCAL)(
+	UINT_PTR, UINT_PTR, UINT_PTR, UINT_PTR,
+	UINT_PTR, UINT_PTR, UINT_PTR, UINT_PTR);
 
 static PFN_D3D12_CREATE_DEVICE_LOCAL gOrigD3D12CreateDevice = nullptr;
 static PFN_D3D12_GET_DEBUG_INTERFACE_LOCAL gOrigD3D12GetDebugInterface = nullptr;
@@ -33,6 +38,52 @@ static PFN_D3D12_SERIALIZE_VERSIONED_ROOT_SIGNATURE_LOCAL gOrigD3D12SerializeVer
 static PFN_D3D12_CREATE_VERSIONED_ROOT_SIGNATURE_DESERIALIZER_LOCAL gOrigD3D12CreateVersionedRootSignatureDeserializer = nullptr;
 static PFN_D3D12_ENABLE_EXPERIMENTAL_FEATURES_LOCAL gOrigD3D12EnableExperimentalFeatures = nullptr;
 static PFN_D3D12_GET_INTERFACE_LOCAL gOrigD3D12GetInterface = nullptr;
+
+static FARPROC GetRealD3D12Proc(const char *name)
+{
+	HMODULE module = LoadRealD3D12();
+	if (!module)
+		return nullptr;
+
+	FARPROC proc = GetProcAddress(module, name);
+	if (!proc)
+		DX12Log("Failed to resolve real d3d12 export %s, error=%lu\n", name, GetLastError());
+	return proc;
+}
+
+static FARPROC GetRealD3D12Proc(WORD ordinal)
+{
+	HMODULE module = LoadRealD3D12();
+	if (!module)
+		return nullptr;
+
+	FARPROC proc = GetProcAddress(module, MAKEINTRESOURCEA(ordinal));
+	if (!proc)
+		DX12Log("Failed to resolve real d3d12 ordinal %u, error=%lu\n", ordinal, GetLastError());
+	return proc;
+}
+
+static UINT_PTR CallRealD3D12Proc(const char *name,
+	UINT_PTR a1 = 0, UINT_PTR a2 = 0, UINT_PTR a3 = 0, UINT_PTR a4 = 0,
+	UINT_PTR a5 = 0, UINT_PTR a6 = 0, UINT_PTR a7 = 0, UINT_PTR a8 = 0)
+{
+	FARPROC proc = GetRealD3D12Proc(name);
+	if (!proc)
+		return static_cast<UINT_PTR>(E_FAIL);
+
+	return reinterpret_cast<PFN_D3D12_GENERIC_LOCAL>(proc)(a1, a2, a3, a4, a5, a6, a7, a8);
+}
+
+static UINT_PTR CallRealD3D12Proc(WORD ordinal,
+	UINT_PTR a1 = 0, UINT_PTR a2 = 0, UINT_PTR a3 = 0, UINT_PTR a4 = 0,
+	UINT_PTR a5 = 0, UINT_PTR a6 = 0, UINT_PTR a7 = 0, UINT_PTR a8 = 0)
+{
+	FARPROC proc = GetRealD3D12Proc(ordinal);
+	if (!proc)
+		return static_cast<UINT_PTR>(E_FAIL);
+
+	return reinterpret_cast<PFN_D3D12_GENERIC_LOCAL>(proc)(a1, a2, a3, a4, a5, a6, a7, a8);
+}
 
 static HMODULE LoadRealD3D12()
 {
@@ -204,6 +255,83 @@ extern "C" HRESULT WINAPI D3D12GetInterface(REFCLSID clsid, REFIID riid, void **
 	if (SUCCEEDED(hr) && object && *object)
 		DX12HookDeviceFactory(static_cast<IUnknown*>(*object));
 	return hr;
+}
+
+extern "C" UINT_PTR WINAPI D3D12Ordinal99(
+	UINT_PTR a1, UINT_PTR a2, UINT_PTR a3, UINT_PTR a4,
+	UINT_PTR a5, UINT_PTR a6, UINT_PTR a7, UINT_PTR a8)
+{
+	return CallRealD3D12Proc(static_cast<WORD>(99), a1, a2, a3, a4, a5, a6, a7, a8);
+}
+
+extern "C" UINT_PTR WINAPI SetAppCompatStringPointer(
+	UINT_PTR a1, UINT_PTR a2, UINT_PTR a3, UINT_PTR a4,
+	UINT_PTR a5, UINT_PTR a6, UINT_PTR a7, UINT_PTR a8)
+{
+	return CallRealD3D12Proc("SetAppCompatStringPointer", a1, a2, a3, a4, a5, a6, a7, a8);
+}
+
+extern "C" UINT_PTR WINAPI D3D12CoreCreateLayeredDevice(
+	UINT_PTR a1, UINT_PTR a2, UINT_PTR a3, UINT_PTR a4,
+	UINT_PTR a5, UINT_PTR a6, UINT_PTR a7, UINT_PTR a8)
+{
+	return CallRealD3D12Proc("D3D12CoreCreateLayeredDevice", a1, a2, a3, a4, a5, a6, a7, a8);
+}
+
+extern "C" UINT_PTR WINAPI D3D12CoreGetLayeredDeviceSize(
+	UINT_PTR a1, UINT_PTR a2, UINT_PTR a3, UINT_PTR a4,
+	UINT_PTR a5, UINT_PTR a6, UINT_PTR a7, UINT_PTR a8)
+{
+	return CallRealD3D12Proc("D3D12CoreGetLayeredDeviceSize", a1, a2, a3, a4, a5, a6, a7, a8);
+}
+
+extern "C" UINT_PTR WINAPI D3D12CoreRegisterLayers(
+	UINT_PTR a1, UINT_PTR a2, UINT_PTR a3, UINT_PTR a4,
+	UINT_PTR a5, UINT_PTR a6, UINT_PTR a7, UINT_PTR a8)
+{
+	return CallRealD3D12Proc("D3D12CoreRegisterLayers", a1, a2, a3, a4, a5, a6, a7, a8);
+}
+
+extern "C" UINT_PTR WINAPI D3D12DeviceRemovedExtendedData(
+	UINT_PTR a1, UINT_PTR a2, UINT_PTR a3, UINT_PTR a4,
+	UINT_PTR a5, UINT_PTR a6, UINT_PTR a7, UINT_PTR a8)
+{
+	return CallRealD3D12Proc("D3D12DeviceRemovedExtendedData", a1, a2, a3, a4, a5, a6, a7, a8);
+}
+
+extern "C" UINT_PTR WINAPI D3D12PIXEventsReplaceBlock(
+	UINT_PTR a1, UINT_PTR a2, UINT_PTR a3, UINT_PTR a4,
+	UINT_PTR a5, UINT_PTR a6, UINT_PTR a7, UINT_PTR a8)
+{
+	return CallRealD3D12Proc("D3D12PIXEventsReplaceBlock", a1, a2, a3, a4, a5, a6, a7, a8);
+}
+
+extern "C" UINT_PTR WINAPI D3D12PIXGetThreadInfo(
+	UINT_PTR a1, UINT_PTR a2, UINT_PTR a3, UINT_PTR a4,
+	UINT_PTR a5, UINT_PTR a6, UINT_PTR a7, UINT_PTR a8)
+{
+	return CallRealD3D12Proc("D3D12PIXGetThreadInfo", a1, a2, a3, a4, a5, a6, a7, a8);
+}
+
+extern "C" UINT_PTR WINAPI D3D12PIXNotifyWakeFromFenceSignal(
+	UINT_PTR a1, UINT_PTR a2, UINT_PTR a3, UINT_PTR a4,
+	UINT_PTR a5, UINT_PTR a6, UINT_PTR a7, UINT_PTR a8)
+{
+	return CallRealD3D12Proc("D3D12PIXNotifyWakeFromFenceSignal", a1, a2, a3, a4, a5, a6, a7, a8);
+}
+
+extern "C" UINT_PTR WINAPI D3D12PIXReportCounter(
+	UINT_PTR a1, UINT_PTR a2, UINT_PTR a3, UINT_PTR a4,
+	UINT_PTR a5, UINT_PTR a6, UINT_PTR a7, UINT_PTR a8)
+{
+	return CallRealD3D12Proc("D3D12PIXReportCounter", a1, a2, a3, a4, a5, a6, a7, a8);
+}
+
+extern "C" UINT_PTR WINAPI GetBehaviorValue(
+	UINT_PTR a1, UINT_PTR a2, UINT_PTR a3, UINT_PTR a4,
+	UINT_PTR a5, UINT_PTR a6, UINT_PTR a7, UINT_PTR a8)
+{
+	return CallRealD3D12Proc("GetBehaviorValue", a1, a2, a3, a4, a5, a6, a7, a8);
 }
 
 BOOL WINAPI DllMain(HINSTANCE module, DWORD reason, LPVOID)

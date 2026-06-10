@@ -289,7 +289,6 @@ static void RecordResource(
 	if (record.hasHeapType && record.heapType == D3D12_HEAP_TYPE_READBACK)
 		return;
 
-	record.resource->AddRef();
 	record.currentState = initialState;
 	record.hasCurrentState = true;
 	if (record.desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) {
@@ -300,8 +299,6 @@ static void RecordResource(
 	AcquireSRWLockExclusive(&gResourceLock);
 	auto found = gResourceByPtr.find(canonical);
 	if (found != gResourceByPtr.end()) {
-		if (gResources[found->second].resource)
-			gResources[found->second].resource->Release();
 		gResources[found->second] = record;
 	} else {
 		gResourceByPtr[canonical] = gResources.size();
@@ -314,12 +311,6 @@ static void RecordResource(
 static void CleanupTrackedResources()
 {
 	AcquireSRWLockExclusive(&gResourceLock);
-	for (ResourceRecord &record : gResources) {
-		if (record.resource) {
-			record.resource->Release();
-			record.resource = nullptr;
-		}
-	}
 	gResources.clear();
 	gResourceByPtr.clear();
 	ReleaseSRWLockExclusive(&gResourceLock);
@@ -992,6 +983,7 @@ void DX12HookResourceMetadata(ID3D12Device *device)
 	if (!gCleanupRegistered) {
 		atexit(CleanupTrackedResources);
 		gCleanupRegistered = true;
+		DX12Log("Resource metadata tracking uses non-owning resource pointers\n");
 	}
 
 	void **vtable = *reinterpret_cast<void***>(device);

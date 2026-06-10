@@ -94,7 +94,7 @@ void DX12HookDevice(IUnknown *device)
 		vtable[CreateComputePipelineStateIndex], HookedCreateComputePipelineState,
 		"ID3D12Device::CreateComputePipelineState");
 	DX12HookResourceMetadata(baseDevice);
-	DX12HookCommandListCreation(baseDevice);
+	DX12Log("Skipping command-list hooks for UE/DX12 stability\n");
 
 	baseDevice->Release();
 
