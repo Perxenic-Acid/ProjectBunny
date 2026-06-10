@@ -214,3 +214,23 @@ $RECYCLE.BIN/
 
 # VS Code
 .vscode/ipch/
+
+# Tauri/Vite app under zaychik
+/zaychik/node_modules/
+/zaychik/dist/
+/zaychik/dist-ssr/
+/zaychik/.vite/
+/zaychik/.turbo/
+/zaychik/.eslintcache
+/zaychik/.parcel-cache/
+/zaychik/coverage/
+/zaychik/logs/
+/zaychik/*.local
+/zaychik/.env
+/zaychik/.env.*
+!/zaychik/.env.example
+/zaychik/.vscode/*
+!/zaychik/.vscode/extensions.json
+/zaychik/src-tauri/target/
+/zaychik/src-tauri/gen/
+/zaychik/src-tauri/.cargo/
