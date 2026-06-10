@@ -1,27 +1,27 @@
 
-# 3Dmigoto重构
+# 3Dmigoto Refactor
 
-此项目用于重构与改进原始3Dmigoto项目
+This project is used to refactor and improve the original 3Dmigoto project.
 
-# 开发环境
+# Development Environment
 
-- Windows11 专业版
+- Windows 11 Pro
 - VSCode
-- C++ Extension Pack(VSCode扩展)
+- C++ Extension Pack (VSCode extension)
 
-# 构建
+# Build
 
-编译Debug x64版本: 
+Build the Debug x64 version:
 
 ```
 .\build_debug_x64.ps1
 ```
 
-编译Release x64版本
+Build the Release x64 version:
 
 ```
 .\build_release_x64.ps1
 ```
 
-(32位由于使用场景与用户过于少，直接不管了，优先专注于x64)
+(32-bit builds are not currently maintained because there are very few use cases and users. The project focuses on x64 first.)
 
