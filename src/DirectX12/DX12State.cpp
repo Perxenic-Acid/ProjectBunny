@@ -2,6 +2,7 @@
 
 #include <Shlwapi.h>
 #include <stdio.h>
+#include <unordered_map>
 #include <unordered_set>
 
 #include "Nektra/NktHookLib.h"
@@ -15,6 +16,7 @@ static ID3D12CommandQueue *gCommandQueue = nullptr;
 static SRWLOCK gStateLock = SRWLOCK_INIT;
 static CNktHookLib gHookMgr;
 static std::unordered_set<void*> gHookedFunctions;
+static std::unordered_map<void*, void*> gOriginalFunctions;
 
 void DX12SetModule(HINSTANCE module)
 {
@@ -66,6 +68,16 @@ static bool RememberHook(void *target)
 	return inserted;
 }
 
+static void RememberOriginal(void *target, void *original)
+{
+	if (!target || !original)
+		return;
+
+	AcquireSRWLockExclusive(&gStateLock);
+	gOriginalFunctions[target] = original;
+	ReleaseSRWLockExclusive(&gStateLock);
+}
+
 DWORD DX12HookFunction(void **original, void *target, void *hook, const char *name)
 {
 	if (!target || !hook)
@@ -75,10 +87,24 @@ DWORD DX12HookFunction(void **original, void *target, void *hook, const char *na
 
 	SIZE_T hookId = 0;
 	DWORD result = gHookMgr.Hook(&hookId, original, target, hook);
+	if (result == ERROR_SUCCESS && original)
+		RememberOriginal(target, *original);
 	DX12Log("%s hook %s target=%p original=%p result=0x%lx\n",
 		result == ERROR_SUCCESS ? "Installed" : "Failed",
 		name, target, original ? *original : nullptr, result);
 	return result;
+}
+
+void *DX12GetOriginalFunction(void *target)
+{
+	if (!target)
+		return nullptr;
+
+	AcquireSRWLockShared(&gStateLock);
+	auto it = gOriginalFunctions.find(target);
+	void *original = it != gOriginalFunctions.end() ? it->second : nullptr;
+	ReleaseSRWLockShared(&gStateLock);
+	return original;
 }
 
 void DX12UnhookAll()

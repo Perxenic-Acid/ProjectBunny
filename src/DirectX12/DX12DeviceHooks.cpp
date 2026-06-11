@@ -94,7 +94,8 @@ void DX12HookDevice(IUnknown *device)
 		vtable[CreateComputePipelineStateIndex], HookedCreateComputePipelineState,
 		"ID3D12Device::CreateComputePipelineState");
 	DX12HookResourceMetadata(baseDevice);
-	DX12Log("Skipping command-list hooks for UE/DX12 stability\n");
+	DX12HookCommandListCreation(baseDevice);
+	DX12Log("DX12 command queue hooks and command-list creation tracking enabled\n");
 
 	baseDevice->Release();
 
@@ -110,7 +111,7 @@ void DX12HookDevice(IUnknown *device)
 		}
 		device2->Release();
 	}
-	// Command-list hooks only record binding metadata; resource readback stays disabled.
+	// Command-list hooks only log/track metadata and forward calls unchanged.
 }
 
 void DX12HookDeviceFactory(IUnknown *factory)
@@ -146,6 +147,7 @@ void DX12HookDeviceFromCommandQueue(IUnknown *commandQueue)
 	ID3D12Device *device = nullptr;
 	HRESULT hr = queue->GetDevice(IID_PPV_ARGS(&device));
 	DX12Log("ID3D12CommandQueue::GetDevice result=0x%lx device=%p\n", hr, device);
+	DX12HookCommandQueue(queue);
 	if (SUCCEEDED(hr) && device) {
 		DX12HookDevice(device);
 		device->Release();

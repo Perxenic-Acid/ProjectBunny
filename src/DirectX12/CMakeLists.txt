@@ -6,6 +6,7 @@ add_library(DirectX12 SHARED
     DX12BindingTracker.cpp
     DX12CommandListHooks.cpp
     DX12DeviceHooks.cpp
+    DX12FrameAnalysis.cpp
     DX12Input.cpp
     DX12Overlay.cpp
     DX12ResourceDump.cpp
@@ -20,10 +21,12 @@ target_include_directories(DirectX12 PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/src/common
     ${CMAKE_SOURCE_DIR}/3rdparty
+    ${CMAKE_SOURCE_DIR}/3rdparty/crc32c-hw-1.0.5/include
 )
 
 target_link_libraries(DirectX12 PRIVATE
     Nektra::NktHookLib
+    crc32c
     dxgi.lib
     User32.lib
     Gdi32.lib

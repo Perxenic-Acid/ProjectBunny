@@ -11,6 +11,7 @@ void DX12CloseLogFile();
 void DX12Log(const char *fmt, ...);
 
 DWORD DX12HookFunction(void **original, void *target, void *hook, const char *name);
+void *DX12GetOriginalFunction(void *target);
 void DX12UnhookAll();
 
 LONG DX12IncrementPresentCount();

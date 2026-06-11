@@ -8,12 +8,14 @@
 #include <string.h>
 
 #include <algorithm>
+#include <new>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 #include "DX12BindingTracker.h"
+#include "DX12FrameAnalysis.h"
 #include "DX12ResourceDump.h"
 #include "DX12ResourceTracker.h"
 #include "DX12State.h"
@@ -40,6 +42,9 @@ static std::vector<PsoRecord> gPsos;
 static std::unordered_map<ID3D12PipelineState*, DX12PsoShaderInfo> gPsoShaderInfo;
 static std::unordered_map<UINT64, DX12PsoShaderSummary> gPsoShaderSummaryByIndex;
 static UINT64 gPsoSerial = 0;
+static volatile LONG gShaderDumpRunning = 0;
+static volatile LONG gShaderDumpCaptureRequested = 0;
+static volatile LONG gShaderDumpCapturing = 0;
 
 typedef HRESULT(WINAPI *PFN_D3D_DISASSEMBLE)(
 	LPCVOID, SIZE_T, UINT, LPCSTR, ID3DBlob**);
@@ -129,11 +134,23 @@ static void RecordPsoShaderSummaryLocked(const DX12PsoShaderInfo &info)
 
 static bool GetDumpDirectory(wchar_t *path, size_t pathCount)
 {
+	return DX12FrameAnalysisGetPath(path, pathCount);
+}
+
+static bool EnsureDirectory(const wchar_t *path)
+{
+	return CreateDirectoryW(path, nullptr) || GetLastError() == ERROR_ALREADY_EXISTS;
+}
+
+static bool GetShaderFixesDirectory(wchar_t *path, size_t pathCount)
+{
+	if (!path || pathCount == 0)
+		return false;
 	if (!GetModuleFileNameW(DX12GetModule(), path, static_cast<DWORD>(pathCount)))
 		return false;
 	PathRemoveFileSpecW(path);
-	PathAppendW(path, L"ShaderDumpDX12");
-	return CreateDirectoryW(path, nullptr) || GetLastError() == ERROR_ALREADY_EXISTS;
+	PathAppendW(path, L"ShaderFixes");
+	return EnsureDirectory(path);
 }
 
 static void RecordShaderLocked(
@@ -174,11 +191,20 @@ static void RecordShaderLocked(
 	}
 }
 
-static bool WriteShaderFile(const wchar_t *dir, const ShaderRecord &record)
+static bool WriteShaderFile(const wchar_t *dir, const ShaderRecord &record,
+	bool overwriteExisting = true, bool *skippedExisting = nullptr)
 {
 	wchar_t path[MAX_PATH];
 	swprintf_s(path, L"%s\\%016llx-%S.bin",
 		dir, static_cast<unsigned long long>(record.hash), record.stage.c_str());
+
+	if (skippedExisting)
+		*skippedExisting = false;
+	if (!overwriteExisting && PathFileExistsW(path)) {
+		if (skippedExisting)
+			*skippedExisting = true;
+		return true;
+	}
 
 	FILE *file = _wfsopen(path, L"wb", _SH_DENYNO);
 	if (!file)
@@ -332,11 +358,20 @@ static bool WriteDXILDisassemblyFile(const wchar_t *path, const ShaderRecord &re
 	return true;
 }
 
-static bool WriteShaderDisassemblyFile(const wchar_t *dir, const ShaderRecord &record)
+static bool WriteShaderDisassemblyFile(const wchar_t *dir, const ShaderRecord &record,
+	bool overwriteExisting = true, bool *skippedExisting = nullptr)
 {
 	wchar_t path[MAX_PATH];
 	swprintf_s(path, L"%s\\%016llx-%S.asm.txt",
 		dir, static_cast<unsigned long long>(record.hash), record.stage.c_str());
+
+	if (skippedExisting)
+		*skippedExisting = false;
+	if (!overwriteExisting && PathFileExistsW(path)) {
+		if (skippedExisting)
+			*skippedExisting = true;
+		return true;
+	}
 
 	if (ShaderIsDXIL(record))
 		return WriteDXILDisassemblyFile(path, record);
@@ -678,7 +713,7 @@ static void WriteShaderAnalysisFile(
 	}
 	fclose(file);
 
-	DX12Log("Shader analysis written: %S entries=%zu\n", path, analyses.size());
+	DX12FrameAnalysisLogInfo("Shader analysis written: %S entries=%zu\n", path, analyses.size());
 }
 
 static void WritePsoResourceSummaryFile(
@@ -690,20 +725,20 @@ static void WritePsoResourceSummaryFile(
 
 	std::unordered_map<std::string, ShaderAnalysisRecord> analysesByKey;
 	analysesByKey.reserve(shaders.size());
-	DX12Log("PSO summary stage: build shader analyses shaders=%zu\n", shaders.size());
+	DX12FrameAnalysisLogInfo("PSO summary stage: build shader analyses shaders=%zu\n", shaders.size());
 	for (const ShaderRecord &shader : shaders) {
 		ShaderAnalysisRecord analysis;
 		BuildShaderAnalysisRecord(dir, shader, &analysis);
 		analysesByKey.emplace(MakeShaderKey(shader.stage.c_str(), shader.hash), std::move(analysis));
 	}
-	DX12Log("PSO summary stage: shader analyses ready entries=%zu\n", analysesByKey.size());
+	DX12FrameAnalysisLogInfo("PSO summary stage: shader analyses ready entries=%zu\n", analysesByKey.size());
 
 	std::vector<DX12RootSignatureSummary> rootSignatures;
 	std::vector<DX12DescriptorSummary> descriptors;
 	std::vector<DX12PsoRootSummary> psoRoots;
-	DX12Log("PSO summary stage: metadata snapshot begin\n");
+	DX12FrameAnalysisLogInfo("PSO summary stage: metadata snapshot begin\n");
 	DX12GetResourceMetadataSnapshot(&rootSignatures, &descriptors, &psoRoots);
-	DX12Log("PSO summary stage: metadata snapshot ready roots=%zu descriptors=%zu psoRoots=%zu\n",
+	DX12FrameAnalysisLogInfo("PSO summary stage: metadata snapshot ready roots=%zu descriptors=%zu psoRoots=%zu\n",
 		rootSignatures.size(), descriptors.size(), psoRoots.size());
 
 	std::unordered_map<ID3D12RootSignature*, DX12RootSignatureSummary> rootsByPtr;
@@ -717,7 +752,7 @@ static void WritePsoResourceSummaryFile(
 	psoRootsByIndex.reserve(psoRoots.size());
 	for (const DX12PsoRootSummary &root : psoRoots)
 		psoRootsByIndex[root.psoIndex] = root;
-	DX12Log("PSO summary stage: lookup maps ready roots=%zu psoRoots=%zu\n",
+	DX12FrameAnalysisLogInfo("PSO summary stage: lookup maps ready roots=%zu psoRoots=%zu\n",
 		rootsByPtr.size(), psoRootsByIndex.size());
 
 	UINT64 totalCBV = 0;
@@ -749,7 +784,7 @@ static void WritePsoResourceSummaryFile(
 				totalBuffer++;
 		}
 	}
-	DX12Log("PSO summary stage: descriptor inventory counted cbv=%llu srv=%llu uav=%llu\n",
+	DX12FrameAnalysisLogInfo("PSO summary stage: descriptor inventory counted cbv=%llu srv=%llu uav=%llu\n",
 		static_cast<unsigned long long>(totalCBV),
 		static_cast<unsigned long long>(totalSRV),
 		static_cast<unsigned long long>(totalUAV));
@@ -759,7 +794,7 @@ static void WritePsoResourceSummaryFile(
 	FILE *file = _wfsopen(path, L"w", _SH_DENYNO);
 	if (!file)
 		return;
-	DX12Log("PSO summary stage: file opened %S\n", path);
+	DX12FrameAnalysisLogInfo("PSO summary stage: file opened %S\n", path);
 
 	fprintf(file, "DX12 PSO Resource Summary\n");
 	fprintf(file, "=========================\n");
@@ -891,7 +926,7 @@ static void WritePsoResourceSummaryFile(
 			candidate);
 		psoRows++;
 	}
-	DX12Log("PSO summary stage: pso rows written=%zu\n", psoRows);
+	DX12FrameAnalysisLogInfo("PSO summary stage: pso rows written=%zu\n", psoRows);
 
 	fprintf(file, "\nRoot Signature Usage\n");
 	fprintf(file, "root_signature,root_hash,root_size,pso_count,first_pso\n");
@@ -915,7 +950,7 @@ static void WritePsoResourceSummaryFile(
 			item.second,
 			static_cast<unsigned long long>(rootFirstPso[item.first]));
 	}
-	DX12Log("PSO summary stage: root usage rows written=%zu\n", rootUseCount.size());
+	DX12FrameAnalysisLogInfo("PSO summary stage: root usage rows written=%zu\n", rootUseCount.size());
 
 	fprintf(file, "\nDescriptor Inventory\n");
 	fprintf(file, "kind,count\n");
@@ -927,7 +962,7 @@ static void WritePsoResourceSummaryFile(
 	fprintf(file, "Sampler,%llu\n", static_cast<unsigned long long>(totalSampler));
 
 	fclose(file);
-	DX12Log("PSO resource summary written: %S psos=%zu roots=%zu descriptors=%zu\n",
+	DX12FrameAnalysisLogInfo("PSO resource summary written: %S psos=%zu roots=%zu descriptors=%zu\n",
 		path, psos.size(), rootSignatures.size(), descriptors.size());
 }
 
@@ -1145,12 +1180,13 @@ void DX12RecordGraphicsPipelineState(
 	UINT64 psoCount = gPsos.size();
 	ReleaseSRWLockExclusive(&gDumpLock);
 
-	DX12Log("Recorded graphics PSO #%llu shaders=%llu cachedShaders=%llu cachedPSOs=%llu\n",
+	DX12FrameAnalysisLogInfo("Recorded graphics PSO #%llu shaders=%llu cachedShaders=%llu cachedPSOs=%llu\n",
 		static_cast<unsigned long long>(psoIndex),
 		static_cast<unsigned long long>(shadersInPso),
 		static_cast<unsigned long long>(shaderCount),
 		static_cast<unsigned long long>(psoCount));
-	DX12SetOverlayStatus(L"3DMigoto DX12 hook alive | cached shaders ready");
+	if (!DX12ShaderDumpIsBusy())
+		DX12SetOverlayStatus(L"3DMigoto DX12 hook alive | cached shaders ready");
 }
 
 void DX12RecordComputePipelineState(
@@ -1176,11 +1212,12 @@ void DX12RecordComputePipelineState(
 	UINT64 psoCount = gPsos.size();
 	ReleaseSRWLockExclusive(&gDumpLock);
 
-	DX12Log("Recorded compute PSO #%llu cachedShaders=%llu cachedPSOs=%llu\n",
+	DX12FrameAnalysisLogInfo("Recorded compute PSO #%llu cachedShaders=%llu cachedPSOs=%llu\n",
 		static_cast<unsigned long long>(psoIndex),
 		static_cast<unsigned long long>(shaderCount),
 		static_cast<unsigned long long>(psoCount));
-	DX12SetOverlayStatus(L"3DMigoto DX12 hook alive | cached shaders ready");
+	if (!DX12ShaderDumpIsBusy())
+		DX12SetOverlayStatus(L"3DMigoto DX12 hook alive | cached shaders ready");
 }
 
 void DX12RecordPipelineStateStream(
@@ -1209,7 +1246,7 @@ void DX12RecordPipelineStateStream(
 		size_t payloadAlignment = PipelineStateStreamPayloadAlignment(type);
 		size_t payloadOffset = AlignUp(offset + sizeof(type), payloadAlignment);
 		if (payloadSize == 0 || payloadOffset + payloadSize > desc->SizeInBytes) {
-			DX12Log("Stopped parsing pipeline state stream pso=%llu type=%d offset=%zu size=%zu\n",
+			DX12FrameAnalysisLogInfo("Stopped parsing pipeline state stream pso=%llu type=%d offset=%zu size=%zu\n",
 				static_cast<unsigned long long>(psoIndex), static_cast<int>(type),
 				offset, desc->SizeInBytes);
 			break;
@@ -1237,12 +1274,13 @@ void DX12RecordPipelineStateStream(
 	UINT64 psoCount = gPsos.size();
 	ReleaseSRWLockExclusive(&gDumpLock);
 
-	DX12Log("Recorded stream PSO #%llu shaders=%llu cachedShaders=%llu cachedPSOs=%llu\n",
+	DX12FrameAnalysisLogInfo("Recorded stream PSO #%llu shaders=%llu cachedShaders=%llu cachedPSOs=%llu\n",
 		static_cast<unsigned long long>(psoIndex),
 		static_cast<unsigned long long>(shadersInPso),
 		static_cast<unsigned long long>(shaderCount),
 		static_cast<unsigned long long>(psoCount));
-	DX12SetOverlayStatus(L"3DMigoto DX12 hook alive | cached shaders ready");
+	if (!DX12ShaderDumpIsBusy())
+		DX12SetOverlayStatus(L"3DMigoto DX12 hook alive | cached shaders ready");
 }
 
 bool DX12GetPipelineStateShaderInfo(ID3D12PipelineState *pipelineState, DX12PsoShaderInfo *info)
@@ -1277,34 +1315,77 @@ bool DX12GetPsoShaderSummary(UINT64 psoIndex, DX12PsoShaderSummary *summary)
 	return true;
 }
 
-void DX12DumpCachedShaders()
+static bool ShaderInfoContainsHash(const DX12PsoShaderInfo &info, const ShaderRecord &shader)
 {
-	wchar_t dir[MAX_PATH];
-	if (!GetDumpDirectory(dir, ARRAYSIZE(dir))) {
-		DX12Log("Failed to create ShaderDumpDX12 directory\n");
-		DX12SetOverlayStatus(L"F8 dump failed: cannot create directory");
-		return;
-	}
+	if (info.hasVS && shader.stage == "vs" && shader.hash == info.vs)
+		return true;
+	if (info.hasPS && shader.stage == "ps" && shader.hash == info.ps)
+		return true;
+	if (info.hasCS && shader.stage == "cs" && shader.hash == info.cs)
+		return true;
+	return false;
+}
 
-	DX12SetOverlayStatus(L"F8 dump requested");
+static void SnapshotShadersAndPsos(std::vector<ShaderRecord> *shaders, std::vector<PsoRecord> *psos)
+{
+	if (!shaders || !psos)
+		return;
 
 	AcquireSRWLockShared(&gDumpLock);
-	std::vector<ShaderRecord> shaders;
-	std::vector<PsoRecord> psos = gPsos;
-	shaders.reserve(gShaders.size());
+	*psos = gPsos;
+	shaders->clear();
+	shaders->reserve(gShaders.size());
 	for (const auto &item : gShaders)
-		shaders.push_back(item.second);
+		shaders->push_back(item.second);
 	ReleaseSRWLockShared(&gDumpLock);
+}
 
-	UINT writtenShaders = 0;
-	UINT writtenDisassembly = 0;
-	for (const ShaderRecord &shader : shaders) {
-		if (WriteShaderFile(dir, shader))
-			writtenShaders++;
-		if (WriteShaderDisassemblyFile(dir, shader))
-			writtenDisassembly++;
+static void SnapshotFrameShadersAndPsos(
+	const std::vector<DX12PsoShaderInfo> &frameInfos,
+	std::vector<ShaderRecord> *shaders, std::vector<PsoRecord> *psos)
+{
+	if (!shaders || !psos)
+		return;
+
+	shaders->clear();
+	psos->clear();
+	std::unordered_set<UINT64> framePsoIndexes;
+	std::unordered_set<std::string> shaderKeys;
+	for (const DX12PsoShaderInfo &info : frameInfos)
+		framePsoIndexes.insert(info.psoIndex);
+
+	AcquireSRWLockShared(&gDumpLock);
+	for (const PsoRecord &pso : gPsos) {
+		if (framePsoIndexes.find(pso.index) == framePsoIndexes.end())
+			continue;
+		psos->push_back(pso);
+		for (const std::string &key : pso.shaders)
+			shaderKeys.insert(key);
 	}
 
+	shaders->reserve(shaderKeys.size());
+	for (const std::string &key : shaderKeys) {
+		auto it = gShaders.find(key);
+		if (it != gShaders.end())
+			shaders->push_back(it->second);
+	}
+
+	// Some older paths only track VS/PS/CS in the frame info. Use them as a fallback.
+	for (const DX12PsoShaderInfo &info : frameInfos) {
+		for (const auto &item : gShaders) {
+			if (!ShaderInfoContainsHash(info, item.second))
+				continue;
+			if (shaderKeys.insert(item.first).second)
+				shaders->push_back(item.second);
+		}
+	}
+	ReleaseSRWLockShared(&gDumpLock);
+}
+
+static void WriteShaderUsageFiles(
+	const wchar_t *dir, const std::vector<ShaderRecord> &shaders,
+	const std::vector<PsoRecord> &psos)
+{
 	wchar_t usagePath[MAX_PATH];
 	swprintf_s(usagePath, L"%s\\ShaderUsage.txt", dir);
 	FILE *usage = _wfsopen(usagePath, L"w", _SH_DENYNO);
@@ -1332,32 +1413,208 @@ void DX12DumpCachedShaders()
 		for (const PsoRecord &pso : psos) {
 			fprintf(psoLog, "pso=%llu kind=%s shaders=",
 				static_cast<unsigned long long>(pso.index), pso.kind.c_str());
-			for (size_t i = 0; i < pso.shaders.size(); ++i) {
+			for (size_t i = 0; i < pso.shaders.size(); ++i)
 				fprintf(psoLog, "%s%s", i ? ";" : "", pso.shaders[i].c_str());
-			}
 			fprintf(psoLog, "\n");
 		}
 		fclose(psoLog);
 	}
+}
 
-	DX12Log("F8 stage: shader analysis begin\n");
-	WriteShaderAnalysisFile(dir, shaders, psos);
+void DX12DumpFrameAnalysis()
+{
+	wchar_t dir[MAX_PATH];
+	if (!GetDumpDirectory(dir, ARRAYSIZE(dir))) {
+		DX12Log("Failed to resolve DX12 frame analysis directory\n");
+		DX12SetOverlayStatus(L"F8 frame analysis failed: cannot create directory");
+		return;
+	}
+
+	DX12SetOverlayStatus(L"F8 frame analysis dumping");
+
+	std::vector<ShaderRecord> shaders;
+	std::vector<PsoRecord> psos;
+	SnapshotShadersAndPsos(&shaders, &psos);
+
 	DX12Log("F8 stage: resource metadata begin\n");
+	DX12FrameAnalysisLogInfo("F8 stage: resource metadata begin\n");
 	DX12DumpResourceMetadata(dir);
-	DX12Log("F8 stage: pso resource summary begin\n");
-	bool psoSummaryOk = TryWritePsoResourceSummaryFile(dir, shaders, psos);
 	DX12Log("F8 stage: binding trace begin\n");
+	DX12FrameAnalysisLogInfo("F8 stage: binding trace begin\n");
 	bool bindingTraceOk = TryDumpBindingTrace(dir);
 	DX12Log("F8 stage: resource files begin\n");
+	DX12FrameAnalysisLogInfo("F8 stage: resource files begin\n");
 	bool resourceFilesOk = TryDumpCurrentFrameResources(dir);
 
-	wchar_t status[128];
-	swprintf_s(status, L"F8 dumped %u shaders / %u asm / %zu PSOs | summary ready",
-		writtenShaders, writtenDisassembly, psos.size());
-	DX12SetOverlayStatus(status);
-	DX12Log("F8 shader dump complete: dir=%S shaders=%u/%zu asm=%u/%zu psos=%zu analysis=1 resourceSummary=%u bindingTrace=%u resourceFiles=%u\n",
-		dir, writtenShaders, shaders.size(), writtenDisassembly, shaders.size(), psos.size(),
-		psoSummaryOk ? 1 : 0,
+	DX12SetOverlayStatus(L"F8 frame analysis complete");
+	DX12Log("F8 frame analysis complete: dir=%S shadersReferenced=%zu psos=%zu bindingTrace=%u resourceFiles=%u\n",
+		dir, shaders.size(), psos.size(),
 		bindingTraceOk ? 1 : 0,
 		resourceFilesOk ? 1 : 0);
+	DX12FrameAnalysisLogInfo("F8 frame analysis complete: dir=%S shadersReferenced=%zu psos=%zu bindingTrace=%u resourceFiles=%u\n",
+		dir, shaders.size(), psos.size(),
+		bindingTraceOk ? 1 : 0,
+		resourceFilesOk ? 1 : 0);
+}
+
+static void DX12DumpShaderRecords(
+	const std::vector<ShaderRecord> &shaders, const std::vector<PsoRecord> &psos,
+	const wchar_t *statusPrefix)
+{
+	wchar_t dir[MAX_PATH];
+	if (!GetShaderFixesDirectory(dir, ARRAYSIZE(dir))) {
+		DX12Log("Failed to resolve DX12 ShaderFixes directory\n");
+		DX12SetOverlayStatus(L"F9 shader dump failed: cannot create ShaderFixes");
+		return;
+	}
+
+	DX12SetOverlayStatus(L"F9 shader dump running");
+	DX12Log("F9 shader dump begin: dir=%S shaders=%zu psos=%zu mode=%S\n",
+		dir, shaders.size(), psos.size(), statusPrefix ? statusPrefix : L"frame");
+
+	UINT writtenShaders = 0;
+	UINT writtenDisassembly = 0;
+	UINT skippedShaders = 0;
+	UINT skippedDisassembly = 0;
+	for (const ShaderRecord &shader : shaders) {
+		bool skipped = false;
+		if (WriteShaderFile(dir, shader, false, &skipped)) {
+			if (skipped)
+				skippedShaders++;
+			else
+				writtenShaders++;
+		}
+		skipped = false;
+		if (WriteShaderDisassemblyFile(dir, shader, false, &skipped)) {
+			if (skipped)
+				skippedDisassembly++;
+			else
+				writtenDisassembly++;
+		}
+	}
+
+	WriteShaderUsageFiles(dir, shaders, psos);
+	WriteShaderAnalysisFile(dir, shaders, psos);
+	bool psoSummaryOk = TryWritePsoResourceSummaryFile(dir, shaders, psos);
+
+	wchar_t status[160];
+	swprintf_s(status, L"F9 %s complete: %u bin / %u asm, PSO summary %s",
+		statusPrefix ? statusPrefix : L"frame", writtenShaders, writtenDisassembly,
+		psoSummaryOk ? L"ok" : L"failed");
+	DX12SetOverlayStatus(status);
+	DX12Log("F9 shader dump complete: dir=%S shaders=%u/%zu skippedShaders=%u asm=%u/%zu skippedAsm=%u psos=%zu psoSummary=%u\n",
+		dir, writtenShaders, shaders.size(), skippedShaders,
+		writtenDisassembly, shaders.size(), skippedDisassembly, psos.size(),
+		psoSummaryOk ? 1 : 0);
+}
+
+void DX12DumpCachedShaders()
+{
+	std::vector<ShaderRecord> shaders;
+	std::vector<PsoRecord> psos;
+	SnapshotShadersAndPsos(&shaders, &psos);
+	DX12DumpShaderRecords(shaders, psos, L"all cached shaders");
+}
+
+struct ShaderDumpThreadArgs
+{
+	std::vector<ShaderRecord> shaders;
+	std::vector<PsoRecord> psos;
+};
+
+static DWORD WINAPI DX12ShaderDumpThreadProc(void *param)
+{
+	ShaderDumpThreadArgs *args = static_cast<ShaderDumpThreadArgs*>(param);
+	__try {
+		if (args)
+			DX12DumpShaderRecords(args->shaders, args->psos, L"frame shaders");
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER) {
+		DX12Log("F9 shader dump failed after exception=0x%lx\n", GetExceptionCode());
+		DX12SetOverlayStatus(L"F9 shader dump failed");
+	}
+	delete args;
+	InterlockedExchange(&gShaderDumpRunning, 0);
+	return 0;
+}
+
+void DX12RequestShaderDump()
+{
+	if (DX12ShaderDumpIsBusy()) {
+		DX12Log("F9 shader dump ignored: already armed/running\n");
+		DX12SetOverlayStatus(L"F9 shader dump still running");
+		return;
+	}
+
+	InterlockedExchange(&gShaderDumpCaptureRequested, 1);
+	DX12SetOverlayStatus(L"F9 armed: waiting for next frame");
+}
+
+bool DX12ShaderDumpIsCaptureRequested()
+{
+	return InterlockedCompareExchange(&gShaderDumpCaptureRequested, 0, 0) != 0;
+}
+
+void DX12ShaderDumpBeginCapture()
+{
+	if (InterlockedCompareExchange(&gShaderDumpCaptureRequested, 0, 1) == 1) {
+		InterlockedExchange(&gShaderDumpCapturing, 1);
+		DX12SetOverlayStatus(L"F9 capturing next frame shaders");
+	}
+}
+
+bool DX12ShaderDumpEndCapture()
+{
+	if (InterlockedCompareExchange(&gShaderDumpCapturing, 0, 1) == 1)
+		return true;
+	return false;
+}
+
+bool DX12ShaderDumpIsCapturingFrame()
+{
+	return InterlockedCompareExchange(&gShaderDumpCapturing, 0, 0) != 0;
+}
+
+bool DX12ShaderDumpIsBusy()
+{
+	return InterlockedCompareExchange(&gShaderDumpCaptureRequested, 0, 0) != 0 ||
+		InterlockedCompareExchange(&gShaderDumpCapturing, 0, 0) != 0 ||
+		InterlockedCompareExchange(&gShaderDumpRunning, 0, 0) != 0;
+}
+
+void DX12DumpCapturedFrameShaders()
+{
+	if (InterlockedCompareExchange(&gShaderDumpRunning, 1, 0) != 0) {
+		DX12SetOverlayStatus(L"F9 shader dump still running");
+		return;
+	}
+
+	std::vector<DX12PsoShaderInfo> frameInfos;
+	DX12GetCurrentFrameShaderInfos(&frameInfos);
+	ShaderDumpThreadArgs *args = new (std::nothrow) ShaderDumpThreadArgs();
+	if (!args) {
+		InterlockedExchange(&gShaderDumpRunning, 0);
+		DX12SetOverlayStatus(L"F9 shader dump failed: out of memory");
+		return;
+	}
+	SnapshotFrameShadersAndPsos(frameInfos, &args->shaders, &args->psos);
+	DX12Log("F9 captured frame shaders: framePsos=%zu shaders=%zu psos=%zu\n",
+		frameInfos.size(), args->shaders.size(), args->psos.size());
+	if (args->shaders.empty() && args->psos.empty()) {
+		delete args;
+		InterlockedExchange(&gShaderDumpRunning, 0);
+		DX12SetOverlayStatus(L"F9 not ready: no frame shaders captured");
+		return;
+	}
+	DX12SetOverlayStatus(L"F9 dumping captured frame shaders");
+
+	HANDLE thread = CreateThread(nullptr, 0, DX12ShaderDumpThreadProc, args, 0, nullptr);
+	if (!thread) {
+		InterlockedExchange(&gShaderDumpRunning, 0);
+		delete args;
+		DX12Log("F9 shader dump failed: CreateThread error=%lu\n", GetLastError());
+		DX12SetOverlayStatus(L"F9 shader dump failed: cannot start thread");
+		return;
+	}
+	CloseHandle(thread);
 }

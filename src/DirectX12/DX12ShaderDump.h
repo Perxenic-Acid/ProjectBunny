@@ -32,4 +32,12 @@ void DX12RecordPipelineStateStream(
 	ID3D12PipelineState *pipelineState, const D3D12_PIPELINE_STATE_STREAM_DESC *desc);
 bool DX12GetPipelineStateShaderInfo(ID3D12PipelineState *pipelineState, DX12PsoShaderInfo *info);
 bool DX12GetPsoShaderSummary(UINT64 psoIndex, DX12PsoShaderSummary *summary);
+void DX12DumpFrameAnalysis();
 void DX12DumpCachedShaders();
+void DX12RequestShaderDump();
+bool DX12ShaderDumpIsCaptureRequested();
+void DX12ShaderDumpBeginCapture();
+bool DX12ShaderDumpEndCapture();
+bool DX12ShaderDumpIsCapturingFrame();
+bool DX12ShaderDumpIsBusy();
+void DX12DumpCapturedFrameShaders();

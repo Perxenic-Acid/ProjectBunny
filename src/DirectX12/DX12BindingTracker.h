@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "DX12ResourceTracker.h"
+#include "DX12ShaderDump.h"
 
 struct DX12FrameResourceBinding
 {
@@ -69,6 +70,7 @@ void DX12BindingRecordDispatch(
 	ID3D12GraphicsCommandList *commandList, UINT threadGroupCountX,
 	UINT threadGroupCountY, UINT threadGroupCountZ);
 void DX12BindingBeginFrame();
+void DX12GetCurrentFrameShaderInfos(std::vector<DX12PsoShaderInfo> *shaderInfos);
 void DX12GetCurrentFrameResourceBindings(std::vector<DX12FrameResourceBinding> *bindings);
 void DX12GetCurrentFrameIaBuffers(std::vector<DX12FrameIaBufferBinding> *buffers);
 void DX12BuildIaBufferFileName(

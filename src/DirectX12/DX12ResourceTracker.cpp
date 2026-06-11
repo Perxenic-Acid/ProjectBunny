@@ -9,7 +9,16 @@
 #include <unordered_map>
 #include <vector>
 
+#include "DX12FrameAnalysis.h"
 #include "DX12State.h"
+
+static void GetSummaryDirectory(const wchar_t *dir, wchar_t *path, size_t pathCount)
+{
+	if (!dir || !path || pathCount == 0)
+		return;
+	swprintf_s(path, pathCount, L"%s\\summary", dir);
+	CreateDirectoryW(path, nullptr);
+}
 
 typedef HRESULT(STDMETHODCALLTYPE *PFN_CREATE_DESCRIPTOR_HEAP)(
 	ID3D12Device*, const D3D12_DESCRIPTOR_HEAP_DESC*, REFIID, void**);
@@ -1219,7 +1228,7 @@ void DX12GetResourceMetadataSnapshot(
 		if (record.hasCurrentState)
 			descriptorStateKnown++;
 	}
-	DX12Log("Metadata snapshot: begin roots=%zu descriptors=%zu descriptorStates=%zu resources=%zu resourcesFromCreate=%llu psoRoots=%zu heaps=%zu requested=%u%u%u%u\n",
+	DX12FrameAnalysisLogInfo("Metadata snapshot: begin roots=%zu descriptors=%zu descriptorStates=%zu resources=%zu resourcesFromCreate=%llu psoRoots=%zu heaps=%zu requested=%u%u%u%u\n",
 		gRootSignatures.size(), gDescriptors.size(), descriptorStateKnown,
 		gResources.size(),
 		static_cast<unsigned long long>(gResourcesRecordedFromCreate),
@@ -1240,7 +1249,7 @@ void DX12GetResourceMetadataSnapshot(
 			summary.nodeMask = record.nodeMask;
 			rootSignatures->push_back(summary);
 		}
-		DX12Log("Metadata snapshot: roots copied=%zu\n", rootSignatures->size());
+		DX12FrameAnalysisLogInfo("Metadata snapshot: roots copied=%zu\n", rootSignatures->size());
 	}
 
 	if (descriptors) {
@@ -1251,7 +1260,7 @@ void DX12GetResourceMetadataSnapshot(
 			FillDescriptorSummary(&summary, record);
 			descriptors->push_back(summary);
 		}
-		DX12Log("Metadata snapshot: descriptors copied=%zu\n", descriptors->size());
+		DX12FrameAnalysisLogInfo("Metadata snapshot: descriptors copied=%zu\n", descriptors->size());
 	}
 
 	if (psoRoots) {
@@ -1265,7 +1274,7 @@ void DX12GetResourceMetadataSnapshot(
 			summary.rootSignature = record.rootSignature;
 			psoRoots->push_back(summary);
 		}
-		DX12Log("Metadata snapshot: psoRoots copied=%zu\n", psoRoots->size());
+		DX12FrameAnalysisLogInfo("Metadata snapshot: psoRoots copied=%zu\n", psoRoots->size());
 	}
 
 	if (descriptorHeaps) {
@@ -1283,11 +1292,11 @@ void DX12GetResourceMetadataSnapshot(
 			summary.increment = record.increment;
 			descriptorHeaps->push_back(summary);
 		}
-		DX12Log("Metadata snapshot: heaps copied=%zu\n", descriptorHeaps->size());
+		DX12FrameAnalysisLogInfo("Metadata snapshot: heaps copied=%zu\n", descriptorHeaps->size());
 	}
 
 	ReleaseSRWLockShared(&gResourceLock);
-	DX12Log("Metadata snapshot: complete\n");
+	DX12FrameAnalysisLogInfo("Metadata snapshot: complete\n");
 }
 
 static void WriteResourceDesc(FILE *file, const DescriptorRecord &record)
@@ -1328,7 +1337,9 @@ void DX12DumpResourceMetadata(const wchar_t *dir)
 	ReleaseSRWLockShared(&gResourceLock);
 
 	wchar_t path[MAX_PATH];
-	swprintf_s(path, L"%s\\ResourceMetadataDX12.txt", dir);
+	wchar_t summaryDir[MAX_PATH];
+	GetSummaryDirectory(dir, summaryDir, ARRAYSIZE(summaryDir));
+	swprintf_s(path, L"%s\\ResourceMetadataDX12.txt", summaryDir);
 	FILE *file = _wfsopen(path, L"w", _SH_DENYNO);
 	if (!file)
 		return;
@@ -1443,6 +1454,6 @@ void DX12DumpResourceMetadata(const wchar_t *dir)
 	}
 
 	fclose(file);
-	DX12Log("Resource metadata written: %S roots=%zu heaps=%zu descriptors=%zu psoRoots=%zu\n",
+	DX12FrameAnalysisLogInfo("Resource metadata written: %S roots=%zu heaps=%zu descriptors=%zu psoRoots=%zu\n",
 		path, rootSignatures.size(), descriptorHeaps.size(), descriptors.size(), psoRoots.size());
 }

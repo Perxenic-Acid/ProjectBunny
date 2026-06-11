@@ -4,8 +4,10 @@
 
 #include "DX12BindingTracker.h"
 #include "DX12DeviceHooks.h"
+#include "DX12FrameAnalysis.h"
 #include "DX12Input.h"
 #include "DX12Overlay.h"
+#include "DX12ShaderDump.h"
 #include "DX12State.h"
 
 typedef HRESULT(STDMETHODCALLTYPE *PFN_CREATE_SWAP_CHAIN)(
@@ -216,10 +218,28 @@ static HRESULT STDMETHODCALLTYPE HookedCreateSwapChainForComposition(
 static HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain *swapChain, UINT syncInterval, UINT flags)
 {
 	DX12PollInput();
+	const bool dumpFrame = DX12FrameAnalysisEndCapture();
+	const bool dumpShaders = DX12ShaderDumpEndCapture();
 	HRESULT hr = gOrigPresent(swapChain, syncInterval, flags);
 	DX12IncrementPresentCount();
 	DX12DrawSwapChainText(swapChain);
-	DX12BindingBeginFrame();
+	if (dumpFrame) {
+		DX12FrameAnalysisLogInfo("----- Frame analysis capture complete -----\n");
+		DX12DumpFrameAnalysis();
+		DX12FrameAnalysisLogInfo("----- Frame analysis complete -----\n");
+		DX12FrameAnalysisEnd();
+	} else if (dumpShaders) {
+		DX12DumpCapturedFrameShaders();
+	} else if (DX12FrameAnalysisIsCaptureRequested()) {
+		DX12BindingBeginFrame();
+		DX12FrameAnalysisBeginCapture();
+		DX12FrameAnalysisLogInfo("----- Frame analysis capture started -----\n");
+	} else if (DX12ShaderDumpIsCaptureRequested()) {
+		DX12BindingBeginFrame();
+		DX12ShaderDumpBeginCapture();
+	} else if (!DX12FrameAnalysisIsCapturing() && !DX12ShaderDumpIsCapturingFrame()) {
+		DX12BindingBeginFrame();
+	}
 	return hr;
 }
 
@@ -227,10 +247,28 @@ static HRESULT STDMETHODCALLTYPE HookedPresent1(
 	IDXGISwapChain1 *swapChain, UINT syncInterval, UINT flags, const DXGI_PRESENT_PARAMETERS *presentParameters)
 {
 	DX12PollInput();
+	const bool dumpFrame = DX12FrameAnalysisEndCapture();
+	const bool dumpShaders = DX12ShaderDumpEndCapture();
 	HRESULT hr = gOrigPresent1(swapChain, syncInterval, flags, presentParameters);
 	DX12IncrementPresentCount();
 	DX12DrawSwapChainText(swapChain);
-	DX12BindingBeginFrame();
+	if (dumpFrame) {
+		DX12FrameAnalysisLogInfo("----- Frame analysis capture complete -----\n");
+		DX12DumpFrameAnalysis();
+		DX12FrameAnalysisLogInfo("----- Frame analysis complete -----\n");
+		DX12FrameAnalysisEnd();
+	} else if (dumpShaders) {
+		DX12DumpCapturedFrameShaders();
+	} else if (DX12FrameAnalysisIsCaptureRequested()) {
+		DX12BindingBeginFrame();
+		DX12FrameAnalysisBeginCapture();
+		DX12FrameAnalysisLogInfo("----- Frame analysis capture started -----\n");
+	} else if (DX12ShaderDumpIsCaptureRequested()) {
+		DX12BindingBeginFrame();
+		DX12ShaderDumpBeginCapture();
+	} else if (!DX12FrameAnalysisIsCapturing() && !DX12ShaderDumpIsCapturingFrame()) {
+		DX12BindingBeginFrame();
+	}
 	return hr;
 }
 

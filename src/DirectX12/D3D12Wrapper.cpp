@@ -147,7 +147,7 @@ void DX12Initialize(HINSTANCE module)
 
 	DX12SetModule(module);
 	DX12OpenLogFile();
-	DX12Log("\n*** 3DMigoto DX12 proxy initialized - stable F8 shader dump baseline, command-list hooks disabled ***\n");
+	DX12Log("\n*** 3DMigoto DX12 proxy initialized - frame analysis logging ready ***\n");
 
 	HANDLE thread = CreateThread(nullptr, 0, DX12WorkerThread, nullptr, 0, nullptr);
 	if (thread)

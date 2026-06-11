@@ -8,6 +8,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "DX12FrameAnalysis.h"
 #include "DX12ResourceTracker.h"
 #include "DX12ShaderDump.h"
 #include "DX12State.h"
@@ -15,6 +16,14 @@
 static constexpr UINT MaxRootParameters = 64;
 static constexpr UINT MaxVertexBufferSlots = 32;
 static constexpr UINT MaxTrackedEvents = 20000;
+
+static void GetSummaryDirectory(const wchar_t *dir, wchar_t *path, size_t pathCount)
+{
+	if (!dir || !path || pathCount == 0)
+		return;
+	swprintf_s(path, pathCount, L"%s\\summary", dir);
+	CreateDirectoryW(path, nullptr);
+}
 
 struct RootTableState
 {
@@ -337,6 +346,24 @@ void DX12BindingBeginFrame()
 	ReleaseSRWLockExclusive(&gBindingLock);
 }
 
+void DX12GetCurrentFrameShaderInfos(std::vector<DX12PsoShaderInfo> *shaderInfos)
+{
+	if (!shaderInfos)
+		return;
+
+	shaderInfos->clear();
+	std::unordered_set<UINT64> seen;
+	AcquireSRWLockShared(&gBindingLock);
+	for (const BindingEvent &event : gEvents) {
+		if (!event.shaderInfo.psoIndex)
+			continue;
+		if (!seen.insert(event.shaderInfo.psoIndex).second)
+			continue;
+		shaderInfos->push_back(event.shaderInfo);
+	}
+	ReleaseSRWLockShared(&gBindingLock);
+}
+
 static void WriteShaderInfo(FILE *file, const DX12PsoShaderInfo &info)
 {
 	if (!file)
@@ -392,12 +419,16 @@ static const DX12DescriptorHeapSummary *FindHeapForGpuHandle(
 	const RootTableState &table,
 	UINT requiredType);
 static const DX12DescriptorSummary *FindDescriptorByCpuHandle(
-	const std::vector<DX12DescriptorSummary> &descriptors, SIZE_T cpuHandle);
+	const std::unordered_map<SIZE_T, const DX12DescriptorSummary*> &descriptorsByCpuHandle,
+	SIZE_T cpuHandle);
+static void BuildDescriptorLookup(
+	const std::vector<DX12DescriptorSummary> &descriptors,
+	std::unordered_map<SIZE_T, const DX12DescriptorSummary*> *descriptorsByCpuHandle);
 
 static std::string ResourceRefsForEvent(
 	const BindingEvent &event,
 	const std::vector<DX12DescriptorHeapSummary> &heaps,
-	const std::vector<DX12DescriptorSummary> &descriptors)
+	const std::unordered_map<SIZE_T, const DX12DescriptorSummary*> &descriptorsByCpuHandle)
 {
 	std::string refs;
 	std::unordered_set<std::string> seen;
@@ -422,7 +453,7 @@ static std::string ResourceRefsForEvent(
 				continue;
 			const UINT64 descriptorIndex = (entry.table.baseDescriptor.ptr - heap->gpuStart) / heap->increment;
 			const SIZE_T cpuHandle = heap->cpuStart + static_cast<SIZE_T>(descriptorIndex) * heap->increment;
-			const DX12DescriptorSummary *descriptor = FindDescriptorByCpuHandle(descriptors, cpuHandle);
+			const DX12DescriptorSummary *descriptor = FindDescriptorByCpuHandle(descriptorsByCpuHandle, cpuHandle);
 			char key[128];
 			sprintf_s(key, "%s%u:%llu:%p",
 				entry.space,
@@ -667,7 +698,7 @@ void DX12GetCurrentFrameIaBuffers(std::vector<DX12FrameIaBufferBinding> *buffers
 	for (const FlatBufferRow &row : rows)
 		buffers->push_back(FrameIaBufferFromFlatRow(row));
 
-	DX12Log("IA buffer stage: events=%zu buffers=%zu\n",
+	DX12FrameAnalysisLogInfo("IA buffer stage: events=%zu buffers=%zu\n",
 		events.size(), buffers->size());
 }
 
@@ -686,6 +717,8 @@ static void WriteFlatFrameAnalysisFiles(
 	std::vector<DX12DescriptorSummary> descriptors;
 	std::vector<DX12DescriptorHeapSummary> heaps;
 	DX12GetResourceMetadataSnapshot(nullptr, &descriptors, nullptr, &heaps);
+	std::unordered_map<SIZE_T, const DX12DescriptorSummary*> descriptorsByCpuHandle;
+	BuildDescriptorLookup(descriptors, &descriptorsByCpuHandle);
 
 	std::vector<FlatBufferRow> buffers;
 	std::unordered_map<std::string, size_t> bufferByKey;
@@ -694,8 +727,11 @@ static void WriteFlatFrameAnalysisFiles(
 	size_t drawRows = 0;
 	size_t dispatchRows = 0;
 
+	wchar_t summaryDir[MAX_PATH];
+	GetSummaryDirectory(dir, summaryDir, ARRAYSIZE(summaryDir));
+
 	wchar_t drawPath[MAX_PATH];
-	swprintf_s(drawPath, L"%s\\DrawCallsDX12.csv", dir);
+	swprintf_s(drawPath, L"%s\\DrawCallsDX12.csv", summaryDir);
 	FILE *drawFile = _wfsopen(drawPath, L"w", _SH_DENYNO);
 	if (drawFile) {
 		fprintf(drawFile,
@@ -710,7 +746,7 @@ static void WriteFlatFrameAnalysisFiles(
 				event, &buffers, &bufferByKey, &nextVbId, &nextIbId);
 			std::string ibResource = IndexBufferIdForEvent(
 				event, &buffers, &bufferByKey, &nextVbId, &nextIbId);
-			std::string resourceRefs = ResourceRefsForEvent(event, heaps, descriptors);
+			std::string resourceRefs = ResourceRefsForEvent(event, heaps, descriptorsByCpuHandle);
 
 			if (IsDrawEvent(event))
 				drawRows++;
@@ -748,12 +784,12 @@ static void WriteFlatFrameAnalysisFiles(
 				resourceRefs.c_str());
 		}
 		fclose(drawFile);
-		DX12Log("Draw call CSV written: %S draws=%zu dispatches=%zu buffers=%zu\n",
+		DX12FrameAnalysisLogInfo("Draw call CSV written: %S draws=%zu dispatches=%zu buffers=%zu\n",
 			drawPath, drawRows, dispatchRows, buffers.size());
 	}
 
 	wchar_t bufferPath[MAX_PATH];
-	swprintf_s(bufferPath, L"%s\\BuffersDX12.csv", dir);
+	swprintf_s(bufferPath, L"%s\\BuffersDX12.csv", summaryDir);
 	FILE *bufferFile = _wfsopen(bufferPath, L"w", _SH_DENYNO);
 	if (bufferFile) {
 		fprintf(bufferFile,
@@ -765,7 +801,7 @@ static void WriteFlatFrameAnalysisFiles(
 			wchar_t fileName[MAX_PATH];
 			DX12BuildIaBufferFileName(iaBuffer, fileName, ARRAYSIZE(fileName));
 			fprintf(bufferFile,
-				"%s,%s,%p,CurrentFrameResourceFiles\\%S,0x%llx,0x%llx,%llu,%llu,%u,%u,%u,%u,0x%x,%u,%u,%llu\n",
+				"%s,%s,%p,%S,0x%llx,0x%llx,%llu,%llu,%u,%u,%u,%u,0x%x,%u,%u,%llu\n",
 				row.id.c_str(),
 				row.role.c_str(),
 				row.resolved ? row.resource.resource : nullptr,
@@ -784,17 +820,17 @@ static void WriteFlatFrameAnalysisFiles(
 				static_cast<unsigned long long>(resourceSize));
 		}
 		fclose(bufferFile);
-		DX12Log("Buffer CSV written: %S rows=%zu\n", bufferPath, buffers.size());
+		DX12FrameAnalysisLogInfo("Buffer CSV written: %S rows=%zu\n", bufferPath, buffers.size());
 	}
 
 	wchar_t framePath[MAX_PATH];
-	swprintf_s(framePath, L"%s\\FrameAnalysisDX12.csv", dir);
+	swprintf_s(framePath, L"%s\\FrameAnalysisDX12.csv", summaryDir);
 	FILE *frameFile = _wfsopen(framePath, L"w", _SH_DENYNO);
 	if (frameFile) {
 		fprintf(frameFile,
 			"events,dropped,max_events,draw_rows,dispatch_rows,descriptor_heaps,descriptors,buffers,"
 			"draw_calls_csv,buffers_csv,current_frame_resources,current_frame_resource_files\n");
-		fprintf(frameFile, "%zu,%llu,%u,%zu,%zu,%zu,%zu,%zu,DrawCallsDX12.csv,BuffersDX12.csv,CurrentFrameResourcesDX12.txt,CurrentFrameResourceFilesDX12.txt\n",
+		fprintf(frameFile, "%zu,%llu,%u,%zu,%zu,%zu,%zu,%zu,summary\\DrawCallsDX12.csv,summary\\BuffersDX12.csv,summary\\CurrentFrameResourcesDX12.txt,summary\\CurrentFrameResourceFilesDX12.txt\n",
 			events.size(),
 			static_cast<unsigned long long>(droppedEvents),
 			MaxTrackedEvents,
@@ -804,7 +840,7 @@ static void WriteFlatFrameAnalysisFiles(
 			descriptors.size(),
 			buffers.size());
 		fclose(frameFile);
-		DX12Log("Frame analysis CSV written: %S events=%zu buffers=%zu\n",
+		DX12FrameAnalysisLogInfo("Frame analysis CSV written: %S events=%zu buffers=%zu\n",
 			framePath, events.size(), buffers.size());
 	}
 }
@@ -826,20 +862,31 @@ static const DX12DescriptorHeapSummary *FindHeapForGpuHandle(
 }
 
 static const DX12DescriptorSummary *FindDescriptorByCpuHandle(
-	const std::vector<DX12DescriptorSummary> &descriptors, SIZE_T cpuHandle)
+	const std::unordered_map<SIZE_T, const DX12DescriptorSummary*> &descriptorsByCpuHandle,
+	SIZE_T cpuHandle)
 {
-	for (const DX12DescriptorSummary &descriptor : descriptors) {
-		if (descriptor.cpuHandle == cpuHandle)
-			return &descriptor;
-	}
-	return nullptr;
+	auto it = descriptorsByCpuHandle.find(cpuHandle);
+	return it != descriptorsByCpuHandle.end() ? it->second : nullptr;
+}
+
+static void BuildDescriptorLookup(
+	const std::vector<DX12DescriptorSummary> &descriptors,
+	std::unordered_map<SIZE_T, const DX12DescriptorSummary*> *descriptorsByCpuHandle)
+{
+	if (!descriptorsByCpuHandle)
+		return;
+
+	descriptorsByCpuHandle->clear();
+	descriptorsByCpuHandle->reserve(descriptors.size());
+	for (const DX12DescriptorSummary &descriptor : descriptors)
+		(*descriptorsByCpuHandle)[descriptor.cpuHandle] = &descriptor;
 }
 
 static void WriteFrameResourceBinding(
 	FILE *file, const BindingEvent &event, const char *bindSpace,
 	const RootTableState &table, UINT heapType,
 	const std::vector<DX12DescriptorHeapSummary> &heaps,
-	const std::vector<DX12DescriptorSummary> &descriptors,
+	const std::unordered_map<SIZE_T, const DX12DescriptorSummary*> &descriptorsByCpuHandle,
 	std::unordered_set<std::string> *seen)
 {
 	if (!file || !table.valid || !seen)
@@ -851,7 +898,7 @@ static void WriteFrameResourceBinding(
 
 	const UINT64 descriptorIndex = (table.baseDescriptor.ptr - heap->gpuStart) / heap->increment;
 	const SIZE_T cpuHandle = heap->cpuStart + static_cast<SIZE_T>(descriptorIndex) * heap->increment;
-	const DX12DescriptorSummary *descriptor = FindDescriptorByCpuHandle(descriptors, cpuHandle);
+	const DX12DescriptorSummary *descriptor = FindDescriptorByCpuHandle(descriptorsByCpuHandle, cpuHandle);
 
 	char key[256];
 	sprintf_s(key, "%llu|%s|%u|%p|%llu",
@@ -910,7 +957,7 @@ static void CollectFrameResourceBinding(
 	const BindingEvent &event, const char *bindSpace,
 	const RootTableState &table, UINT heapType,
 	const std::vector<DX12DescriptorHeapSummary> &heaps,
-	const std::vector<DX12DescriptorSummary> &descriptors,
+	const std::unordered_map<SIZE_T, const DX12DescriptorSummary*> &descriptorsByCpuHandle,
 	std::unordered_set<std::string> *seen)
 {
 	if (!bindings || !table.valid || !seen)
@@ -922,7 +969,7 @@ static void CollectFrameResourceBinding(
 
 	const UINT64 descriptorIndex = (table.baseDescriptor.ptr - heap->gpuStart) / heap->increment;
 	const SIZE_T cpuHandle = heap->cpuStart + static_cast<SIZE_T>(descriptorIndex) * heap->increment;
-	const DX12DescriptorSummary *descriptor = FindDescriptorByCpuHandle(descriptors, cpuHandle);
+	const DX12DescriptorSummary *descriptor = FindDescriptorByCpuHandle(descriptorsByCpuHandle, cpuHandle);
 
 	char key[256];
 	sprintf_s(key, "%llu|%s|%u|%p|%llu",
@@ -960,14 +1007,18 @@ void DX12GetCurrentFrameResourceBindings(std::vector<DX12FrameResourceBinding> *
 	AcquireSRWLockShared(&gBindingLock);
 	events = gEvents;
 	ReleaseSRWLockShared(&gBindingLock);
-	DX12Log("Binding resources stage: events snapshot=%zu\n", events.size());
+	DX12FrameAnalysisLogInfo("Binding resources stage: events snapshot=%zu\n", events.size());
 
 	std::vector<DX12DescriptorSummary> descriptors;
 	std::vector<DX12DescriptorHeapSummary> heaps;
-	DX12Log("Binding resources stage: metadata snapshot begin\n");
+	DX12FrameAnalysisLogInfo("Binding resources stage: metadata snapshot begin\n");
 	DX12GetResourceMetadataSnapshot(nullptr, &descriptors, nullptr, &heaps);
-	DX12Log("Binding resources stage: metadata snapshot ready descriptors=%zu heaps=%zu\n",
+	DX12FrameAnalysisLogInfo("Binding resources stage: metadata snapshot ready descriptors=%zu heaps=%zu\n",
 		descriptors.size(), heaps.size());
+	std::unordered_map<SIZE_T, const DX12DescriptorSummary*> descriptorsByCpuHandle;
+	BuildDescriptorLookup(descriptors, &descriptorsByCpuHandle);
+	DX12FrameAnalysisLogInfo("Binding resources stage: descriptor lookup ready entries=%zu\n",
+		descriptorsByCpuHandle.size());
 
 	bindings->clear();
 	std::unordered_set<std::string> seen;
@@ -975,19 +1026,19 @@ void DX12GetCurrentFrameResourceBindings(std::vector<DX12FrameResourceBinding> *
 		for (UINT i = 0; i < MaxRootParameters; ++i) {
 			CollectFrameResourceBinding(bindings, event, "graphics_cbv_srv_uav",
 				event.graphicsTables[i], D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
-				heaps, descriptors, &seen);
+				heaps, descriptorsByCpuHandle, &seen);
 			CollectFrameResourceBinding(bindings, event, "graphics_sampler",
 				event.graphicsTables[i], D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,
-				heaps, descriptors, &seen);
+				heaps, descriptorsByCpuHandle, &seen);
 			CollectFrameResourceBinding(bindings, event, "compute_cbv_srv_uav",
 				event.computeTables[i], D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
-				heaps, descriptors, &seen);
+				heaps, descriptorsByCpuHandle, &seen);
 			CollectFrameResourceBinding(bindings, event, "compute_sampler",
 				event.computeTables[i], D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,
-				heaps, descriptors, &seen);
+				heaps, descriptorsByCpuHandle, &seen);
 		}
 	}
-	DX12Log("Binding resources stage: collected bindings=%zu unique=%zu\n",
+	DX12FrameAnalysisLogInfo("Binding resources stage: collected bindings=%zu unique=%zu\n",
 		bindings->size(), seen.size());
 }
 
@@ -998,17 +1049,23 @@ static void WriteFrameResourceFile(const wchar_t *dir, const std::vector<Binding
 
 	std::vector<DX12DescriptorSummary> descriptors;
 	std::vector<DX12DescriptorHeapSummary> heaps;
-	DX12Log("Frame resource file stage: metadata snapshot begin events=%zu\n", events.size());
+	DX12FrameAnalysisLogInfo("Frame resource file stage: metadata snapshot begin events=%zu\n", events.size());
 	DX12GetResourceMetadataSnapshot(nullptr, &descriptors, nullptr, &heaps);
-	DX12Log("Frame resource file stage: metadata snapshot ready descriptors=%zu heaps=%zu\n",
+	DX12FrameAnalysisLogInfo("Frame resource file stage: metadata snapshot ready descriptors=%zu heaps=%zu\n",
 		descriptors.size(), heaps.size());
+	std::unordered_map<SIZE_T, const DX12DescriptorSummary*> descriptorsByCpuHandle;
+	BuildDescriptorLookup(descriptors, &descriptorsByCpuHandle);
+	DX12FrameAnalysisLogInfo("Frame resource file stage: descriptor lookup ready entries=%zu\n",
+		descriptorsByCpuHandle.size());
 
 	wchar_t path[MAX_PATH];
-	swprintf_s(path, L"%s\\CurrentFrameResourcesDX12.txt", dir);
+	wchar_t summaryDir[MAX_PATH];
+	GetSummaryDirectory(dir, summaryDir, ARRAYSIZE(summaryDir));
+	swprintf_s(path, L"%s\\CurrentFrameResourcesDX12.txt", summaryDir);
 	FILE *file = _wfsopen(path, L"w", _SH_DENYNO);
 	if (!file)
 		return;
-	DX12Log("Frame resource file stage: file opened %S\n", path);
+	DX12FrameAnalysisLogInfo("Frame resource file stage: file opened %S\n", path);
 
 	fprintf(file, "DX12 Current Frame Resources\n");
 	fprintf(file, "============================\n");
@@ -1023,24 +1080,24 @@ static void WriteFrameResourceFile(const wchar_t *dir, const std::vector<Binding
 		for (UINT i = 0; i < MaxRootParameters; ++i) {
 			WriteFrameResourceBinding(file, event, "graphics_cbv_srv_uav",
 				event.graphicsTables[i], D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
-				heaps, descriptors, &seen);
+				heaps, descriptorsByCpuHandle, &seen);
 			WriteFrameResourceBinding(file, event, "graphics_sampler",
 				event.graphicsTables[i], D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,
-				heaps, descriptors, &seen);
+				heaps, descriptorsByCpuHandle, &seen);
 			WriteFrameResourceBinding(file, event, "compute_cbv_srv_uav",
 				event.computeTables[i], D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
-				heaps, descriptors, &seen);
+				heaps, descriptorsByCpuHandle, &seen);
 			WriteFrameResourceBinding(file, event, "compute_sampler",
 				event.computeTables[i], D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,
-				heaps, descriptors, &seen);
+				heaps, descriptorsByCpuHandle, &seen);
 		}
 		eventRows++;
 	}
-	DX12Log("Frame resource file stage: events processed=%zu bindings=%zu\n",
+	DX12FrameAnalysisLogInfo("Frame resource file stage: events processed=%zu bindings=%zu\n",
 		eventRows, seen.size());
 
 	fclose(file);
-	DX12Log("Current-frame resources written: %S bindings=%zu heaps=%zu descriptors=%zu\n",
+	DX12FrameAnalysisLogInfo("Current-frame resources written: %S bindings=%zu heaps=%zu descriptors=%zu\n",
 		path, seen.size(), heaps.size(), descriptors.size());
 }
 
@@ -1057,7 +1114,9 @@ void DX12DumpBindingTrace(const wchar_t *dir)
 	ReleaseSRWLockShared(&gBindingLock);
 
 	wchar_t path[MAX_PATH];
-	swprintf_s(path, L"%s\\BindingTraceDX12.txt", dir);
+	wchar_t summaryDir[MAX_PATH];
+	GetSummaryDirectory(dir, summaryDir, ARRAYSIZE(summaryDir));
+	swprintf_s(path, L"%s\\BindingTraceDX12.txt", summaryDir);
 	FILE *file = _wfsopen(path, L"w", _SH_DENYNO);
 	if (!file)
 		return;
@@ -1112,7 +1171,7 @@ void DX12DumpBindingTrace(const wchar_t *dir)
 	}
 
 	fclose(file);
-	DX12Log("Current-frame binding trace written: %S events=%zu dropped=%llu\n",
+	DX12FrameAnalysisLogInfo("Current-frame binding trace written: %S events=%zu dropped=%llu\n",
 		path, events.size(), static_cast<unsigned long long>(droppedEvents));
 	WriteFlatFrameAnalysisFiles(dir, events, droppedEvents);
 	WriteFrameResourceFile(dir, events);
