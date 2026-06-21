@@ -215,22 +215,26 @@ $RECYCLE.BIN/
 # VS Code
 .vscode/ipch/
 
-# Tauri/Vite app under zaychik
-/zaychik/node_modules/
-/zaychik/dist/
-/zaychik/dist-ssr/
-/zaychik/.vite/
-/zaychik/.turbo/
-/zaychik/.eslintcache
-/zaychik/.parcel-cache/
-/zaychik/coverage/
-/zaychik/logs/
+# Python / Blender add-on generated files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Blender add-on local state
+/zaychik/Config.json
 /zaychik/*.local
 /zaychik/.env
 /zaychik/.env.*
 !/zaychik/.env.example
-/zaychik/.vscode/*
-!/zaychik/.vscode/extensions.json
-/zaychik/src-tauri/target/
-/zaychik/src-tauri/gen/
-/zaychik/src-tauri/.cargo/
+
+# Blender extension packaging output
+/zaychik/*.zip
+/zaychik/*.tar.gz
+/zaychik/build/
+/zaychik/dist/
+
+# Keep Blender add-on source and extension metadata trackable
+!/zaychik/__init__.py
+!/zaychik/blender_manifest.toml
+!/zaychik/ui/
+!/zaychik/utils/
