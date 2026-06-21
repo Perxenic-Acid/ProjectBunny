@@ -651,11 +651,20 @@ struct FlatBufferRow
 {
 	std::string id;
 	std::string role;
+	std::string skinningClass;
 	UINT64 eventSerial = 0;
 	UINT64 drawId = 0;
 	UINT64 dispatchId = 0;
 	UINT64 psoIndex = 0;
 	DX12PsoShaderInfo shaderInfo = {};
+	UINT64 producerEventSerial = 0;
+	UINT64 producerDrawId = 0;
+	UINT64 producerDispatchId = 0;
+	UINT64 producerPsoIndex = 0;
+	DX12PsoShaderInfo producerShaderInfo = {};
+	std::string producerBindSpace;
+	UINT producerRootParameterIndex = 0;
+	UINT producerShaderRegister = UINT_MAX;
 	UINT64 gpuVa = 0;
 	UINT64 size = 0;
 	UINT stride = 0;
@@ -663,6 +672,21 @@ struct FlatBufferRow
 	UINT format = 0;
 	bool resolved = false;
 	DX12BufferResourceSummary resource = {};
+};
+
+struct BufferProducer
+{
+	UINT64 eventSerial = 0;
+	UINT64 drawId = 0;
+	UINT64 dispatchId = 0;
+	UINT64 psoIndex = 0;
+	DX12PsoShaderInfo shaderInfo = {};
+	std::string bindSpace;
+	UINT rootParameterIndex = 0;
+	UINT shaderRegister = UINT_MAX;
+	ID3D12Resource *resource = nullptr;
+	UINT64 begin = 0;
+	UINT64 end = 0;
 };
 
 static std::string MakeBufferKey(
@@ -827,16 +851,147 @@ static void CollectFrameIaBuffersForEvents(
 	}
 }
 
+static bool RangesOverlap(UINT64 aBegin, UINT64 aSize, UINT64 bBegin, UINT64 bSize)
+{
+	if (aSize == 0 || bSize == 0)
+		return false;
+	const UINT64 aEnd = aBegin + aSize;
+	const UINT64 bEnd = bBegin + bSize;
+	if (aEnd < aBegin || bEnd < bBegin)
+		return false;
+	return aBegin < bEnd && bBegin < aEnd;
+}
+
+static bool BindingIsUavBufferProducer(const DX12FrameResourceBinding &binding)
+{
+	if (binding.rootDescriptor)
+		return binding.rangeType == D3D12_ROOT_PARAMETER_TYPE_UAV &&
+			binding.gpuVirtualAddress != 0;
+	if (!binding.hasDescriptor || binding.descriptor.kind != "UAV")
+		return false;
+	if (!binding.descriptor.resource)
+		return false;
+	if (!binding.descriptor.hasResourceDesc ||
+		binding.descriptor.resourceDesc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER)
+		return false;
+	return true;
+}
+
+static BufferProducer ProducerFromBinding(const DX12FrameResourceBinding &binding)
+{
+	BufferProducer producer;
+	producer.eventSerial = binding.eventSerial;
+	producer.drawId = binding.drawId;
+	producer.dispatchId = binding.dispatchId;
+	producer.psoIndex = binding.psoIndex;
+	producer.shaderInfo = binding.shaderInfo;
+	producer.bindSpace = binding.bindSpace;
+	producer.rootParameterIndex = binding.rootParameterIndex;
+	producer.shaderRegister = binding.shaderRegister;
+	if (binding.rootDescriptor) {
+		DX12BufferResourceSummary resource;
+		if (DX12ResolveBufferResourceByGpuVa(binding.gpuVirtualAddress, 1, &resource)) {
+			producer.resource = resource.resource;
+			producer.begin = binding.gpuVirtualAddress;
+			const UINT64 viewBytes = resource.viewSize ? resource.viewSize :
+				resource.hasResourceDesc ? resource.resourceDesc.Width : 1;
+			producer.end = producer.begin + viewBytes;
+			if (producer.end < producer.begin)
+				producer.end = producer.begin;
+		}
+		return producer;
+	}
+	producer.resource = binding.descriptor.resource;
+	producer.begin = binding.descriptor.gpuVirtualAddress + binding.descriptor.resourceOffset;
+	const UINT64 viewBytes = binding.descriptor.viewSize ?
+		binding.descriptor.viewSize : binding.descriptor.resourceDesc.Width;
+	producer.end = producer.begin + viewBytes;
+	if (producer.end < producer.begin)
+		producer.end = producer.begin;
+	return producer;
+}
+
+static const BufferProducer *FindLatestProducerForBuffer(
+	const FlatBufferRow &row, const std::vector<BufferProducer> &producers)
+{
+	if (row.role != "VB" || !row.resolved || !row.resource.resource)
+		return nullptr;
+
+	const BufferProducer *best = nullptr;
+	for (const BufferProducer &producer : producers) {
+		if (producer.eventSerial >= row.eventSerial)
+			continue;
+		if (producer.resource != row.resource.resource)
+			continue;
+		if (!RangesOverlap(row.gpuVa, row.size, producer.begin, producer.end - producer.begin))
+			continue;
+		if (!best || producer.eventSerial > best->eventSerial)
+			best = &producer;
+	}
+	return best;
+}
+
+static void ClassifyIaBufferSkinning(
+	std::vector<FlatBufferRow> *buffers,
+	const std::vector<DX12FrameResourceBinding> &resourceBindings)
+{
+	if (!buffers)
+		return;
+
+	std::vector<BufferProducer> producers;
+	for (const DX12FrameResourceBinding &binding : resourceBindings) {
+		if (!BindingIsUavBufferProducer(binding))
+			continue;
+		BufferProducer producer = ProducerFromBinding(binding);
+		if (producer.begin == producer.end)
+			continue;
+		producers.push_back(std::move(producer));
+	}
+
+	for (FlatBufferRow &row : *buffers) {
+		if (row.role != "VB") {
+			row.skinningClass = "not_applicable";
+			continue;
+		}
+
+		const BufferProducer *producer = FindLatestProducerForBuffer(row, producers);
+		if (producer) {
+			row.skinningClass = "gpu_preskinning";
+			row.producerEventSerial = producer->eventSerial;
+			row.producerDrawId = producer->drawId;
+			row.producerDispatchId = producer->dispatchId;
+			row.producerPsoIndex = producer->psoIndex;
+			row.producerShaderInfo = producer->shaderInfo;
+			row.producerBindSpace = producer->bindSpace;
+			row.producerRootParameterIndex = producer->rootParameterIndex;
+			row.producerShaderRegister = producer->shaderRegister;
+		} else if (row.resolved) {
+			row.skinningClass = "cpu_preskinning";
+		} else {
+			row.skinningClass = "unknown";
+		}
+	}
+}
+
 static DX12FrameIaBufferBinding FrameIaBufferFromFlatRow(const FlatBufferRow &row)
 {
 	DX12FrameIaBufferBinding buffer;
 	buffer.bufferId = row.id;
 	buffer.role = row.role;
+	buffer.skinningClass = row.skinningClass;
 	buffer.eventSerial = row.eventSerial;
 	buffer.drawId = row.drawId;
 	buffer.dispatchId = row.dispatchId;
 	buffer.psoIndex = row.psoIndex;
 	buffer.shaderInfo = row.shaderInfo;
+	buffer.producerEventSerial = row.producerEventSerial;
+	buffer.producerDrawId = row.producerDrawId;
+	buffer.producerDispatchId = row.producerDispatchId;
+	buffer.producerPsoIndex = row.producerPsoIndex;
+	buffer.producerShaderInfo = row.producerShaderInfo;
+	buffer.producerBindSpace = row.producerBindSpace;
+	buffer.producerRootParameterIndex = row.producerRootParameterIndex;
+	buffer.producerShaderRegister = row.producerShaderRegister;
 	buffer.gpuVa = row.gpuVa;
 	buffer.size = row.size;
 	buffer.stride = row.stride;
@@ -885,6 +1040,9 @@ void DX12GetCurrentFrameIaBuffers(std::vector<DX12FrameIaBufferBinding> *buffers
 
 	std::vector<FlatBufferRow> rows;
 	CollectFrameIaBuffersForEvents(events, &rows);
+	std::vector<DX12FrameResourceBinding> resourceBindings;
+	DX12GetCurrentFrameResourceBindings(&resourceBindings);
+	ClassifyIaBufferSkinning(&rows, resourceBindings);
 
 	buffers->clear();
 	buffers->reserve(rows.size());
@@ -985,16 +1143,21 @@ static void WriteFlatFrameAnalysisFiles(
 	swprintf_s(bufferPath, L"%s\\BuffersDX12.csv", summaryDir);
 	FILE *bufferFile = _wfsopen(bufferPath, L"w", _SH_DENYNO);
 	if (bufferFile) {
+		std::vector<DX12FrameResourceBinding> resourceBindings;
+		DX12GetCurrentFrameResourceBindings(&resourceBindings);
+		ClassifyIaBufferSkinning(&buffers, resourceBindings);
 		fprintf(bufferFile,
 			"buffer_id,role,resource,file,gpu_va,resource_gpu_va,offset,size,stride,slot,format,"
-			"resolved,current_state,has_current_state,heap_type,resource_size\n");
+			"resolved,current_state,has_current_state,heap_type,resource_size,skin_source,"
+			"producer_event,producer_draw,producer_dispatch,producer_pso,producer_bind,"
+			"producer_root,producer_reg\n");
 		for (const FlatBufferRow &row : buffers) {
 			UINT64 resourceSize = row.resource.hasResourceDesc ? row.resource.resourceDesc.Width : 0;
 			DX12FrameIaBufferBinding iaBuffer = FrameIaBufferFromFlatRow(row);
 			wchar_t fileName[MAX_PATH];
 			DX12BuildIaBufferFileName(iaBuffer, fileName, ARRAYSIZE(fileName));
 			fprintf(bufferFile,
-				"%s,%s,%p,%S,0x%llx,0x%llx,%llu,%llu,%u,%u,%u,%u,0x%x,%u,%u,%llu\n",
+				"%s,%s,%p,%S,0x%llx,0x%llx,%llu,%llu,%u,%u,%u,%u,0x%x,%u,%u,%llu,%s,%llu,%llu,%llu,%llu,%s,%u,%u\n",
 				row.id.c_str(),
 				row.role.c_str(),
 				row.resolved ? row.resource.resource : nullptr,
@@ -1010,7 +1173,15 @@ static void WriteFlatFrameAnalysisFiles(
 				row.resolved ? row.resource.currentState : 0,
 				row.resolved && row.resource.hasCurrentState ? 1 : 0,
 				row.resolved && row.resource.hasResourceHeapType ? row.resource.resourceHeapType : 0,
-				static_cast<unsigned long long>(resourceSize));
+				static_cast<unsigned long long>(resourceSize),
+				row.skinningClass.empty() ? "unknown" : row.skinningClass.c_str(),
+				static_cast<unsigned long long>(row.producerEventSerial),
+				static_cast<unsigned long long>(row.producerDrawId),
+				static_cast<unsigned long long>(row.producerDispatchId),
+				static_cast<unsigned long long>(row.producerPsoIndex),
+				row.producerBindSpace.empty() ? "-" : row.producerBindSpace.c_str(),
+				row.producerRootParameterIndex,
+				row.producerShaderRegister);
 		}
 		fclose(bufferFile);
 		DX12FrameAnalysisLogInfo("Buffer CSV written: %S rows=%zu\n", bufferPath, buffers.size());

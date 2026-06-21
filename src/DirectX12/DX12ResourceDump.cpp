@@ -561,8 +561,19 @@ static bool MapAndWriteTask(
 
 static bool ShouldDumpBinding(const DX12FrameResourceBinding &binding)
 {
-	(void)binding;
-	return false;
+	if (binding.dispatchId != 0 || binding.drawId == 0)
+		return false;
+	if (binding.bindSpace != "graphics_cbv_srv_uav" && binding.bindSpace != "graphics_root")
+		return false;
+	if (binding.rootDescriptor)
+		return binding.rangeType == D3D12_ROOT_PARAMETER_TYPE_CBV &&
+			binding.gpuVirtualAddress != 0;
+	if (!binding.hasDescriptor || binding.descriptor.kind != "CBV")
+		return false;
+	if (!binding.descriptor.hasResourceDesc ||
+		binding.descriptor.resourceDesc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER)
+		return false;
+	return binding.descriptor.resource != nullptr;
 }
 
 static bool CreateReadbackForTask(
@@ -639,17 +650,42 @@ static bool PrepareTask(
 	const bool gpuCopy = GpuResourceCopyEnabled();
 	task->sourceKind = DumpTaskSource::Descriptor;
 	task->binding = binding;
-	task->source = binding.descriptor.resource;
-	task->desc = binding.descriptor.resourceDesc;
-	task->sourceState = binding.descriptor.hasCurrentState ?
-		static_cast<D3D12_RESOURCE_STATES>(binding.descriptor.currentState) :
-		GuessSourceState(binding);
-	task->stateKnown = StateTrackingAllowsCopy(binding.descriptor);
+	if (binding.rootDescriptor) {
+		DX12BufferResourceSummary resource;
+		if (!DX12ResolveBufferResourceByGpuVa(binding.gpuVirtualAddress, 1, &resource) ||
+			!resource.resource || !resource.hasResourceDesc) {
+			task->skipNote = "unresolved_root_cbv";
+			return false;
+		}
+		task->source = resource.resource;
+		task->desc = resource.resourceDesc;
+		task->binding.hasDescriptor = true;
+		task->binding.descriptor.kind = "CBV";
+		task->binding.descriptor.resource = resource.resource;
+		task->binding.descriptor.resourceDesc = resource.resourceDesc;
+		task->binding.descriptor.hasResourceDesc = resource.hasResourceDesc;
+		task->binding.descriptor.resourceHeapType = resource.resourceHeapType;
+		task->binding.descriptor.hasResourceHeapType = resource.hasResourceHeapType;
+		task->binding.descriptor.gpuVirtualAddress = resource.gpuVirtualAddress;
+		task->binding.descriptor.resourceOffset = resource.resourceOffset;
+		const UINT64 availableBytes = task->desc.Width > resource.resourceOffset ?
+			task->desc.Width - resource.resourceOffset : 0;
+		task->binding.descriptor.viewSize = availableBytes > 4096 ? 4096 : availableBytes;
+		task->binding.descriptor.currentState = resource.currentState;
+		task->binding.descriptor.hasCurrentState = resource.hasCurrentState;
+	} else {
+		task->source = binding.descriptor.resource;
+		task->desc = binding.descriptor.resourceDesc;
+	}
+	task->sourceState = task->binding.descriptor.hasCurrentState ?
+		static_cast<D3D12_RESOURCE_STATES>(task->binding.descriptor.currentState) :
+		GuessSourceState(task->binding);
+	task->stateKnown = StateTrackingAllowsCopy(task->binding.descriptor);
 	if (!unsafeCopy && !task->stateKnown) {
 		task->skipNote = "state_unknown";
 		return false;
 	}
-	task->needsBarrier = ResourceNeedsBarrier(binding.descriptor);
+	task->needsBarrier = ResourceNeedsBarrier(task->binding.descriptor);
 
 	if (task->desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D) {
 		if (task->desc.SampleDesc.Count > 1) {
@@ -661,8 +697,8 @@ static bool PrepareTask(
 			&task->textureLayout, &task->textureRows, &rowSize, &task->copyBytes);
 		task->isTexture = true;
 	} else if (task->desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) {
-		task->sourceOffset = binding.descriptor.resourceOffset;
-		task->copyBytes = binding.descriptor.viewSize ? binding.descriptor.viewSize : task->desc.Width;
+		task->sourceOffset = task->binding.descriptor.resourceOffset;
+		task->copyBytes = task->binding.descriptor.viewSize ? task->binding.descriptor.viewSize : task->desc.Width;
 		if (task->sourceOffset + task->copyBytes > task->desc.Width)
 			task->copyBytes = task->desc.Width > task->sourceOffset ? task->desc.Width - task->sourceOffset : 0;
 		task->isTexture = false;
@@ -1079,7 +1115,7 @@ void DX12DumpCurrentFrameResources(const wchar_t *dir)
 	for (const DX12FrameResourceBinding &binding : bindings) {
 		if (!ShouldDumpBinding(binding))
 			continue;
-		if (!binding.hasDescriptor) {
+		if (!binding.hasDescriptor && !binding.rootDescriptor) {
 			DumpTask skipped;
 			skipped.binding = binding;
 			skipped.skipNote = binding.rootDescriptor ? "root_descriptor_summary_only" : "untracked_descriptor";
@@ -1088,15 +1124,24 @@ void DX12DumpCurrentFrameResources(const wchar_t *dir)
 		}
 
 		char key[128];
-		sprintf_s(key, "%p|%llu|%llu",
-			binding.descriptor.resource,
-			static_cast<unsigned long long>(binding.descriptor.resourceOffset),
-			static_cast<unsigned long long>(binding.descriptor.viewSize));
+		if (binding.rootDescriptor) {
+			sprintf_s(key, "root|0x%llx",
+				static_cast<unsigned long long>(binding.gpuVirtualAddress));
+		} else {
+			sprintf_s(key, "%p|%llu|%llu",
+				binding.descriptor.resource,
+				static_cast<unsigned long long>(binding.descriptor.resourceOffset),
+				static_cast<unsigned long long>(binding.descriptor.viewSize));
+		}
 		auto canonicalIt = canonicalTaskByKey.find(key);
-		if (binding.descriptor.resource && canonicalIt != canonicalTaskByKey.end()) {
+		if (canonicalIt != canonicalTaskByKey.end()) {
 			DumpTask duplicate;
 			duplicate = tasks[canonicalIt->second];
 			duplicate.binding = binding;
+			if (binding.rootDescriptor) {
+				duplicate.binding.hasDescriptor = true;
+				duplicate.binding.descriptor = tasks[canonicalIt->second].binding.descriptor;
+			}
 			duplicate.sourceKind = DumpTaskSource::Descriptor;
 			wchar_t fileName[MAX_PATH];
 			BuildFileName(duplicate, fileName, ARRAYSIZE(fileName));

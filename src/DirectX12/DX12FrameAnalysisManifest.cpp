@@ -195,16 +195,21 @@ void DX12FrameAnalysisManifestWriteIaBinding(
 	const wchar_t *filePath)
 {
 	char vs[32], ps[32], cs[32], hash[16];
+	char producerCs[32];
 	FormatShaderHash(buffer.shaderInfo.vs, buffer.shaderInfo.hasVS, vs, ARRAYSIZE(vs));
 	FormatShaderHash(buffer.shaderInfo.ps, buffer.shaderInfo.hasPS, ps, ARRAYSIZE(ps));
 	FormatShaderHash(buffer.shaderInfo.cs, buffer.shaderInfo.hasCS, cs, ARRAYSIZE(cs));
+	FormatShaderHash(buffer.producerShaderInfo.cs, buffer.producerShaderInfo.hasCS,
+		producerCs, ARRAYSIZE(producerCs));
 	FormatFileHash(filePath, hash, ARRAYSIZE(hash));
 
 	DX12FrameAnalysisLogEvent(
 		"bind.ia event=%llu draw=%llu dispatch=%llu pso=%llu "
 		"vs=%s ps=%s cs=%s role=%s slot=%u resource=%p dim=%s gpu=0x%llx "
 		"offset=%llu bytes=%llu stride=%u fmt=%u fmt_name=%s state=0x%x state_known=%u "
-		"file=%S hash=%s\n",
+		"skin_source=%s producer_event=%llu producer_draw=%llu producer_dispatch=%llu "
+		"producer_pso=%llu producer_cs=%s producer_bind=%s producer_root=%u "
+		"producer_reg=%u file=%S hash=%s\n",
 		static_cast<unsigned long long>(buffer.eventSerial),
 		static_cast<unsigned long long>(buffer.drawId),
 		static_cast<unsigned long long>(buffer.dispatchId),
@@ -222,6 +227,15 @@ void DX12FrameAnalysisManifestWriteIaBinding(
 		DxgiFormatName(buffer.format),
 		static_cast<UINT>(sourceState),
 		hasCurrentState ? 1 : 0,
+		buffer.skinningClass.empty() ? "unknown" : buffer.skinningClass.c_str(),
+		static_cast<unsigned long long>(buffer.producerEventSerial),
+		static_cast<unsigned long long>(buffer.producerDrawId),
+		static_cast<unsigned long long>(buffer.producerDispatchId),
+		static_cast<unsigned long long>(buffer.producerPsoIndex),
+		producerCs,
+		buffer.producerBindSpace.empty() ? "-" : buffer.producerBindSpace.c_str(),
+		buffer.producerRootParameterIndex,
+		buffer.producerShaderRegister,
 		filePath ? filePath : L"",
 		hash);
 }

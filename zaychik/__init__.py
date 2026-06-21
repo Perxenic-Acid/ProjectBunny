@@ -20,9 +20,11 @@ from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import bpy
+from mathutils import Matrix
 from bpy.props import (
     BoolProperty,
     CollectionProperty,
+    EnumProperty,
     IntProperty,
     PointerProperty,
     StringProperty,
@@ -65,6 +67,15 @@ BIND_IA_RE = re.compile(
     r"stride=(?P<stride>\d+).*?"
     r"fmt=(?P<fmt>\d+).*?"
     r"fmt_name=(?P<fmt_name>[A-Z0-9_]+).*?"
+    r"(?:skin_source=(?P<skin_source>[a-z_]+).*?)?"
+    r"file=(?P<file>deduped\\[^ ]+)"
+)
+
+BIND_RESOURCE_RE = re.compile(
+    r"bind\.resource event=(?P<event>\d+).*?"
+    r"bind=(?P<bind>[a-z_]+).*?"
+    r"kind=(?P<kind>[A-Z]+).*?"
+    r"bytes=(?P<bytes>\d+).*?"
     r"file=(?P<file>deduped\\[^ ]+)"
 )
 
@@ -79,6 +90,7 @@ class VertexBinding:
     stride: int
     fmt: int
     fmt_name: str
+    skin_source: str
     relative_path: str
 
 
@@ -87,6 +99,13 @@ class IndexBinding:
     bytes: int
     fmt: int
     fmt_name: str
+    relative_path: str
+
+
+@dataclass
+class ConstantBufferBinding:
+    bind_space: str
+    bytes: int
     relative_path: str
 
 
@@ -100,8 +119,10 @@ class DrawCall:
     start_index: int
     base_vertex: int
     instance_count: int
+    skin_source: str = "unknown"
     vertex_bindings: Dict[int, VertexBinding] = field(default_factory=dict)
     index_binding: Optional[IndexBinding] = None
+    constant_buffers: List[ConstantBufferBinding] = field(default_factory=list)
 
 
 class ZAYCHIK_PG_frameanalysis_item(PropertyGroup):
@@ -145,6 +166,20 @@ def parse_draw_calls(log_path: str) -> List[DrawCall]:
 
         bind_match = BIND_IA_RE.search(line)
         if not bind_match:
+            resource_match = BIND_RESOURCE_RE.search(line)
+            if not resource_match:
+                continue
+
+            draw = draws.get(int(resource_match.group("event")))
+            if draw is None or resource_match.group("kind") != "CBV":
+                continue
+            draw.constant_buffers.append(
+                ConstantBufferBinding(
+                    bind_space=resource_match.group("bind"),
+                    bytes=int(resource_match.group("bytes")),
+                    relative_path=resource_match.group("file"),
+                )
+            )
             continue
 
         event = int(bind_match.group("event"))
@@ -163,10 +198,14 @@ def parse_draw_calls(log_path: str) -> List[DrawCall]:
                 stride=int(bind_match.group("stride")),
                 fmt=int(bind_match.group("fmt")),
                 fmt_name=bind_match.group("fmt_name"),
+                skin_source=bind_match.group("skin_source") or "unknown",
                 relative_path=relative_path,
             )
             if draw is not None:
                 draw.vertex_bindings[binding.slot] = binding
+                if binding.skin_source != "not_applicable":
+                    if draw.skin_source == "unknown" or binding.skin_source == "gpu_preskinning":
+                        draw.skin_source = binding.skin_source
         elif role == "IB" and draw is not None:
             draw.index_binding = IndexBinding(
                 bytes=int(bind_match.group("bytes")),
@@ -277,7 +316,81 @@ def read_indices(path: str, fmt_name: str, start_index: int, index_count: int) -
     return indices
 
 
-def build_faces(indices: List[int], base_vertex: int) -> List[Tuple[int, int, int]]:
+def iter_float4x4(data: bytes) -> Iterable[Tuple[int, Tuple[float, ...]]]:
+    float_count = len(data) // 4
+    if float_count < 16:
+        return
+    for float_offset in range(0, float_count - 15, 4):
+        byte_offset = float_offset * 4
+        yield byte_offset, struct.unpack_from("<16f", data, byte_offset)
+
+
+def finite_values(values: Tuple[float, ...]) -> bool:
+    return all(value == value and abs(value) < 1.0e12 for value in values)
+
+
+def score_world_matrix(matrix: Matrix) -> float:
+    translation = matrix.to_translation()
+    translation_len = translation.length
+    if translation_len > 1.0e7:
+        return -1.0
+
+    basis_lengths = [matrix.col[index].to_3d().length for index in range(3)]
+    if any(length < 0.0001 or length > 10000.0 for length in basis_lengths):
+        return -1.0
+
+    det = matrix.to_3x3().determinant()
+    if abs(det) < 1.0e-8:
+        return -1.0
+
+    score = 0.0
+    if translation_len > 0.001:
+        score += 100.0
+    score += min(translation_len, 100000.0) / 100000.0
+    score -= sum(abs(length - 1.0) for length in basis_lengths)
+    return score
+
+
+def matrix_from_float4x4(values: Tuple[float, ...], row_vector_layout: bool) -> Matrix:
+    rows = [values[index : index + 4] for index in range(0, 16, 4)]
+    matrix = Matrix(rows)
+    if row_vector_layout:
+        matrix.transpose()
+    return matrix
+
+
+def find_world_matrix_in_buffer(path: str) -> Optional[Matrix]:
+    data = read_binary_file(path)
+    best_score = -1.0
+    best_matrix: Optional[Matrix] = None
+
+    for _offset, values in iter_float4x4(data):
+        if not finite_values(values):
+            continue
+        for row_vector_layout in (False, True):
+            matrix = matrix_from_float4x4(values, row_vector_layout)
+            score = score_world_matrix(matrix)
+            if score > best_score:
+                best_score = score
+                best_matrix = matrix
+
+    return best_matrix if best_score >= 0.0 else None
+
+
+def find_draw_world_matrix(dump_dir: str, draw: DrawCall) -> Optional[Matrix]:
+    for binding in draw.constant_buffers:
+        if binding.bind_space != "graphics_cbv_srv_uav":
+            continue
+        cbv_path = resolve_binding_path(dump_dir, binding.relative_path)
+        if not os.path.isfile(cbv_path):
+            continue
+        matrix = find_world_matrix_in_buffer(cbv_path)
+        if matrix is not None:
+            return matrix
+    return None
+
+
+def build_faces(indices: List[int], base_vertex: int, vertex_count: int) -> List[Tuple[int, int, int]]:
     faces: List[Tuple[int, int, int]] = []
     usable = len(indices) - (len(indices) % 3)
     for offset in range(0, usable, 3):
@@ -287,6 +400,8 @@ def build_faces(indices: List[int], base_vertex: int) -> List[Tuple[int, int, in
         if a == b or b == c or a == c:
             continue
         if min(a, b, c) < 0:
+            continue
+        if max(a, b, c) >= vertex_count:
             continue
         faces.append((a, b, c))
     return faces
@@ -312,6 +427,8 @@ def create_mesh_object(
     positions: List[Tuple[float, float, float]],
     faces: List[Tuple[int, int, int]],
     uvs: Optional[List[Tuple[float, float]]],
+    collection_name: Optional[str],
+    world_matrix: Optional[Matrix],
 ) -> bpy.types.Object:
     mesh = bpy.data.meshes.new(name)
     mesh.from_pydata(positions, [], faces)
@@ -321,7 +438,16 @@ def create_mesh_object(
         apply_uvs(mesh, uvs, faces)
 
     obj = bpy.data.objects.new(name, mesh)
-    context.collection.objects.link(obj)
+    if collection_name:
+        collection = bpy.data.collections.get(collection_name)
+        if collection is None:
+            collection = bpy.data.collections.new(collection_name)
+            context.scene.collection.children.link(collection)
+        collection.objects.link(obj)
+    else:
+        context.collection.objects.link(obj)
+    if world_matrix is not None:
+        obj.matrix_world = world_matrix
     return obj
 
 
@@ -351,7 +477,7 @@ def import_draw_call(context: bpy.types.Context, dump_dir: str, draw: DrawCall) 
     if not positions:
         return False, f"event {draw.event}: empty position data"
 
-    faces = build_faces(indices, draw.base_vertex)
+    faces = build_faces(indices, draw.base_vertex, len(positions))
     if not faces:
         return False, f"event {draw.event}: no valid triangle faces"
 
@@ -362,8 +488,13 @@ def import_draw_call(context: bpy.types.Context, dump_dir: str, draw: DrawCall) 
         if os.path.isfile(uv_path):
             uv_data = read_uvs(uv_path, uv_binding.stride, len(positions))
 
-    object_name = f"Dump_{draw.event}_{draw.vs[:8]}"
-    create_mesh_object(context, object_name, positions, faces, uv_data)
+    object_name = f"Dump_{draw.event}_{draw.skin_source}_{draw.vs[:8]}"
+    collection_name = {
+        "gpu_preskinning": "GPU-PreSkinning",
+        "cpu_preskinning": "CPU-PreSkinning",
+    }.get(draw.skin_source, "Unknown-PreSkinning")
+    world_matrix = find_draw_world_matrix(dump_dir, draw)
+    create_mesh_object(context, object_name, positions, faces, uv_data, collection_name, world_matrix)
     return True, f"Imported {object_name}"
 
 
@@ -379,6 +510,16 @@ class ZAYCHIK_PG_settings(PropertyGroup):
         name="Import All Matching",
         description="Import every matching draw up to Max Imports instead of stopping after the first success",
         default=True,
+    )
+    skin_source_filter: EnumProperty(
+        name="Skin Source",
+        description="Filter draw calls by detected pre-skinning source",
+        items=(
+            ("all", "All", "Import all detected draw calls"),
+            ("gpu_preskinning", "Only GPU-PreSkinning", "Import draw calls whose VB was produced by an earlier UAV write"),
+            ("cpu_preskinning", "Only CPU-PreSkinning", "Import draw calls with direct IA vertex data"),
+        ),
+        default="all",
     )
     last_status: StringProperty(
         name="Status",
@@ -540,6 +681,10 @@ class ZAYCHIK_OT_import_dx12_dump(Operator):
             return {"CANCELLED"}
 
         matching_draws = [draw for draw in draws if draw.index_binding and draw.vertex_bindings]
+        if settings.skin_source_filter != "all":
+            matching_draws = [
+                draw for draw in matching_draws if draw.skin_source == settings.skin_source_filter
+            ]
         if not matching_draws:
             self.report({"WARNING"}, "No usable indexed draw calls were found")
             settings.last_status = "No usable draw calls"
@@ -597,6 +742,7 @@ class ZAYCHIK_PT_sidebar(Panel):
         )
         layout.prop(settings, "max_imports")
         layout.prop(settings, "import_all_matching")
+        layout.prop(settings, "skin_source_filter")
         layout.operator(ZAYCHIK_OT_import_dx12_dump.bl_idname, icon="IMPORT")
 
         box = layout.box()

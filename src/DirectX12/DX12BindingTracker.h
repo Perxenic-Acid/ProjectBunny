@@ -39,11 +39,20 @@ struct DX12FrameIaBufferBinding
 {
 	std::string bufferId;
 	std::string role;
+	std::string skinningClass;
 	UINT64 eventSerial = 0;
 	UINT64 drawId = 0;
 	UINT64 dispatchId = 0;
 	UINT64 psoIndex = 0;
 	DX12PsoShaderInfo shaderInfo;
+	UINT64 producerEventSerial = 0;
+	UINT64 producerDrawId = 0;
+	UINT64 producerDispatchId = 0;
+	UINT64 producerPsoIndex = 0;
+	DX12PsoShaderInfo producerShaderInfo;
+	std::string producerBindSpace;
+	UINT producerRootParameterIndex = 0;
+	UINT producerShaderRegister = UINT_MAX;
 	UINT64 gpuVa = 0;
 	UINT64 size = 0;
 	UINT stride = 0;
