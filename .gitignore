@@ -238,3 +238,5 @@ __pycache__/
 !/zaychik/blender_manifest.toml
 !/zaychik/ui/
 !/zaychik/utils/
+
+__pycache__
