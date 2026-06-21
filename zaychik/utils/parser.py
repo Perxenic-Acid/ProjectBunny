@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 
 @dataclass
@@ -58,9 +59,51 @@ class DrawCall:
 class LogParser:
     """Parses a DX12 frame-analysis log.jsonl into a list of DrawCall objects."""
 
+    _MISSING_FIELD_QUOTE_RE = re.compile(r',([A-Za-z_][A-Za-z0-9_]*)":')
+
     @staticmethod
-    def _to_int(value: str, base: int = 10) -> int:
-        return int(value, base) if value else 0
+    def _to_int(value: Any, base: int = 10) -> int:
+        if value is None or value == "":
+            return 0
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            return int(value)
+        text = str(value).strip()
+        if not text or text == "-":
+            return 0
+        try:
+            if text.lower().startswith("0x"):
+                return int(text, 16)
+            return int(text, base)
+        except ValueError:
+            return 0
+
+    @staticmethod
+    def _to_str(value: Any, default: str = "") -> str:
+        if value is None:
+            return default
+        return str(value)
+
+    @classmethod
+    def _call_index(cls, obj: dict) -> int:
+        return cls._to_int(obj.get("call_index", obj.get("event", obj.get("index", 0))))
+
+    @staticmethod
+    def _loads_json_line(line: str) -> Optional[dict]:
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            fixed = LogParser._MISSING_FIELD_QUOTE_RE.sub(r',"\1":', line)
+            if fixed == line:
+                return None
+            try:
+                obj = json.loads(fixed)
+            except json.JSONDecodeError:
+                return None
+        return obj if isinstance(obj, dict) else None
 
     @staticmethod
     def _iter_json_lines(path: str) -> Iterable[dict]:
@@ -68,10 +111,9 @@ class LogParser:
             for line in handle:
                 line = line.strip()
                 if line:
-                    try:
-                        yield json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
+                    obj = LogParser._loads_json_line(line)
+                    if obj is not None:
+                        yield obj
 
     @classmethod
     def parse(cls, log_path: str) -> List[DrawCall]:
@@ -88,54 +130,53 @@ class LogParser:
         draws: Dict[int, DrawCall] = {}
 
         for obj in cls._iter_json_lines(log_path):
-            type_str = obj.get('type')
-            func = obj.get('func')
+            type_str = obj.get("type")
+            func = obj.get("func")
 
-            if func in ('DrawIndexedInstanced', 'DrawInstanced') or type_str == 'call.draw':
-                event = obj.get('call_index', obj.get('event', obj.get('index', 0)))
+            if func in ("DrawIndexedInstanced", "DrawInstanced") or type_str == "call.draw":
+                event = cls._call_index(obj)
                 draws[event] = DrawCall(
                     event=event,
-                    vs=obj.get('vs', '-'),
-                    topology=obj.get('topology', 'UNKNOWN'),
-                    index_count=obj.get('index_count', 0),
-                    start_vertex=obj.get('start_vertex', 0),
-                    start_index=obj.get('start_index', 0),
-                    base_vertex=obj.get('base_vertex', 0),
-                    instance_count=obj.get('instance_count', 0),
+                    vs=cls._to_str(obj.get("vs"), "-"),
+                    topology=cls._to_str(obj.get("topology"), "UNKNOWN"),
+                    index_count=cls._to_int(obj.get("index_count")),
+                    start_vertex=cls._to_int(obj.get("start_vertex")),
+                    start_index=cls._to_int(obj.get("start_index")),
+                    base_vertex=cls._to_int(obj.get("base_vertex")),
+                    instance_count=cls._to_int(obj.get("instance_count")),
                 )
                 continue
 
-            if func == 'BindIA' or type_str == 'bind.ia':
-                event = obj.get('call_index', obj.get('event', 0))
+            if func == "BindIA" or type_str == "bind.ia":
+                event = cls._call_index(obj)
                 draw = draws.get(event)
-                role = obj.get('role', '')
-                relative_path = obj.get('file', '')
-                gpu_str = obj.get('gpu', '0x0')
-                gpu = int(gpu_str, 16) if isinstance(gpu_str, str) else gpu_str
-                offset = obj.get('offset', 0)
+                role = cls._to_str(obj.get("role"))
+                relative_path = cls._to_str(obj.get("file"))
+                gpu = cls._to_int(obj.get("gpu"))
+                offset = cls._to_int(obj.get("offset"))
 
-                if role == 'VB':
+                if role == "VB":
                     binding = VertexBinding(
-                        slot=obj.get('slot', 0),
-                        bytes=obj.get('bytes', 0),
-                        stride=obj.get('stride', 0),
-                        fmt=obj.get('fmt', 0),
-                        fmt_name=obj.get('fmt_name', ''),
-                        skin_source=obj.get('skin_source') or 'unknown',
+                        slot=cls._to_int(obj.get("slot")),
+                        bytes=cls._to_int(obj.get("bytes")),
+                        stride=cls._to_int(obj.get("stride")),
+                        fmt=cls._to_int(obj.get("fmt")),
+                        fmt_name=cls._to_str(obj.get("fmt_name")),
+                        skin_source=cls._to_str(obj.get("skin_source"), "unknown") or "unknown",
                         relative_path=relative_path,
                         gpu=gpu,
                         offset=offset,
                     )
                     if draw is not None:
                         draw.vertex_bindings[binding.slot] = binding
-                        if binding.skin_source != 'not_applicable':
-                            if draw.skin_source == 'unknown' or binding.skin_source == 'gpu_preskinning':
+                        if binding.skin_source != "not_applicable":
+                            if draw.skin_source == "unknown" or binding.skin_source == "gpu_preskinning":
                                 draw.skin_source = binding.skin_source
-                elif role == 'IB':
+                elif role == "IB":
                     ib = IndexBinding(
-                        bytes=obj.get('bytes', 0),
-                        fmt=obj.get('fmt', 0),
-                        fmt_name=obj.get('fmt_name', ''),
+                        bytes=cls._to_int(obj.get("bytes")),
+                        fmt=cls._to_int(obj.get("fmt")),
+                        fmt_name=cls._to_str(obj.get("fmt_name")),
                         relative_path=relative_path,
                         gpu=gpu,
                         offset=offset,
@@ -144,20 +185,20 @@ class LogParser:
                         draw.index_binding = ib
                 continue
 
-            if func == 'BindResource' or type_str == 'bind.resource':
-                event = obj.get('call_index', obj.get('event', 0))
+            if func == "BindResource" or type_str == "bind.resource":
+                event = cls._call_index(obj)
                 draw = draws.get(event)
                 if draw is None:
                     continue
-                if obj.get('kind') != 'CBV':
+                if obj.get("kind") != "CBV":
                     continue
                 draw.constant_buffers.append(
                     ConstantBufferBinding(
-                        bind_space=obj.get('bind', ''),
-                        root_index=obj.get('root', 0),
-                        reg=obj.get('reg', 0),
-                        bytes=obj.get('bytes', 0),
-                        relative_path=obj.get('file', ''),
+                        bind_space=cls._to_str(obj.get("bind")),
+                        root_index=cls._to_int(obj.get("root")),
+                        reg=cls._to_int(obj.get("reg")),
+                        bytes=cls._to_int(obj.get("bytes")),
+                        relative_path=cls._to_str(obj.get("file")),
                     )
                 )
 
