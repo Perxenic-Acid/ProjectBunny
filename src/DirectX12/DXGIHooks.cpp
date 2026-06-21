@@ -5,6 +5,7 @@
 #include "DX12BindingTracker.h"
 #include "DX12DeviceHooks.h"
 #include "DX12FrameAnalysis.h"
+#include "DX12HookManager.h"
 #include "DX12Input.h"
 #include "DX12Overlay.h"
 #include "DX12ShaderDump.h"
@@ -61,15 +62,17 @@ static void HookSwapChain(IDXGISwapChain *swapChain)
 	if (!swapChain)
 		return;
 
-	void **vtable = *reinterpret_cast<void***>(swapChain);
-	DX12HookFunction(reinterpret_cast<void**>(&gOrigPresent),
-		vtable[8], HookedPresent, "IDXGISwapChain::Present");
+	DX12VTableHook swapChainHooks[] = {
+		{8, reinterpret_cast<void**>(&gOrigPresent), HookedPresent, "IDXGISwapChain::Present"},
+	};
+	DX12InstallVTableHooks(swapChain, swapChainHooks);
 
 	IDXGISwapChain1 *swapChain1 = nullptr;
 	if (SUCCEEDED(swapChain->QueryInterface(IID_PPV_ARGS(&swapChain1)))) {
-		void **vtable1 = *reinterpret_cast<void***>(swapChain1);
-		DX12HookFunction(reinterpret_cast<void**>(&gOrigPresent1),
-			vtable1[22], HookedPresent1, "IDXGISwapChain1::Present1");
+		DX12VTableHook swapChain1Hooks[] = {
+			{22, reinterpret_cast<void**>(&gOrigPresent1), HookedPresent1, "IDXGISwapChain1::Present1"},
+		};
+		DX12InstallVTableHooks(swapChain1, swapChain1Hooks);
 		swapChain1->Release();
 	}
 }
@@ -87,21 +90,25 @@ static void HookFactory(IUnknown *factory)
 
 	IDXGIFactory *factory0 = nullptr;
 	if (SUCCEEDED(factory->QueryInterface(IID_PPV_ARGS(&factory0)))) {
-		void **vtable = *reinterpret_cast<void***>(factory0);
-		DX12HookFunction(reinterpret_cast<void**>(&gOrigCreateSwapChain),
-			vtable[10], HookedCreateSwapChain, "IDXGIFactory::CreateSwapChain");
+		DX12VTableHook factoryHooks[] = {
+			{10, reinterpret_cast<void**>(&gOrigCreateSwapChain), HookedCreateSwapChain,
+				"IDXGIFactory::CreateSwapChain"},
+		};
+		DX12InstallVTableHooks(factory0, factoryHooks);
 		factory0->Release();
 	}
 
 	IDXGIFactory2 *factory2 = nullptr;
 	if (SUCCEEDED(factory->QueryInterface(IID_PPV_ARGS(&factory2)))) {
-		void **vtable = *reinterpret_cast<void***>(factory2);
-		DX12HookFunction(reinterpret_cast<void**>(&gOrigCreateSwapChainForHwnd),
-			vtable[15], HookedCreateSwapChainForHwnd, "IDXGIFactory2::CreateSwapChainForHwnd");
-		DX12HookFunction(reinterpret_cast<void**>(&gOrigCreateSwapChainForCoreWindow),
-			vtable[16], HookedCreateSwapChainForCoreWindow, "IDXGIFactory2::CreateSwapChainForCoreWindow");
-		DX12HookFunction(reinterpret_cast<void**>(&gOrigCreateSwapChainForComposition),
-			vtable[24], HookedCreateSwapChainForComposition, "IDXGIFactory2::CreateSwapChainForComposition");
+		DX12VTableHook factory2Hooks[] = {
+			{15, reinterpret_cast<void**>(&gOrigCreateSwapChainForHwnd),
+				HookedCreateSwapChainForHwnd, "IDXGIFactory2::CreateSwapChainForHwnd"},
+			{16, reinterpret_cast<void**>(&gOrigCreateSwapChainForCoreWindow),
+				HookedCreateSwapChainForCoreWindow, "IDXGIFactory2::CreateSwapChainForCoreWindow"},
+			{24, reinterpret_cast<void**>(&gOrigCreateSwapChainForComposition),
+				HookedCreateSwapChainForComposition, "IDXGIFactory2::CreateSwapChainForComposition"},
+		};
+		DX12InstallVTableHooks(factory2, factory2Hooks);
 		factory2->Release();
 	}
 }
@@ -290,10 +297,10 @@ void DX12InstallDXGIHooks()
 	}
 
 	HookDXGIFactoryVTables(dxgi);
-	DX12HookFunction(reinterpret_cast<void**>(&gOrigCreateDXGIFactory),
-		GetProcAddress(dxgi, "CreateDXGIFactory"), HookedCreateDXGIFactory, "CreateDXGIFactory");
-	DX12HookFunction(reinterpret_cast<void**>(&gOrigCreateDXGIFactory1),
-		GetProcAddress(dxgi, "CreateDXGIFactory1"), HookedCreateDXGIFactory1, "CreateDXGIFactory1");
-	DX12HookFunction(reinterpret_cast<void**>(&gOrigCreateDXGIFactory2),
-		GetProcAddress(dxgi, "CreateDXGIFactory2"), HookedCreateDXGIFactory2, "CreateDXGIFactory2");
+	DX12InstallExportHook(dxgi, "CreateDXGIFactory",
+		reinterpret_cast<void**>(&gOrigCreateDXGIFactory), HookedCreateDXGIFactory);
+	DX12InstallExportHook(dxgi, "CreateDXGIFactory1",
+		reinterpret_cast<void**>(&gOrigCreateDXGIFactory1), HookedCreateDXGIFactory1);
+	DX12InstallExportHook(dxgi, "CreateDXGIFactory2",
+		reinterpret_cast<void**>(&gOrigCreateDXGIFactory2), HookedCreateDXGIFactory2);
 }

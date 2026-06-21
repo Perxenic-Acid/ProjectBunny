@@ -3,6 +3,7 @@
 #include <d3d12.h>
 
 #include "DX12CommandListHooks.h"
+#include "DX12HookManager.h"
 #include "DX12ResourceTracker.h"
 #include "DX12ShaderDump.h"
 #include "DX12State.h"
@@ -75,24 +76,17 @@ void DX12HookDevice(IUnknown *device)
 	if (FAILED(device->QueryInterface(IID_PPV_ARGS(&baseDevice))))
 		return;
 
-	void **vtable = *reinterpret_cast<void***>(baseDevice);
-	if (!vtable)
-	{
-		baseDevice->Release();
-		return;
-	}
-
 	// IUnknown(0-2) + ID3D12Object(3-6) + ID3D12Device methods:
 	// GetNodeCount(7), CreateCommandQueue(8), CreateCommandAllocator(9).
-	constexpr size_t CreateGraphicsPipelineStateIndex = 10;
-	constexpr size_t CreateComputePipelineStateIndex = 11;
-
-	DX12HookFunction(reinterpret_cast<void**>(&gOrigCreateGraphicsPipelineState),
-		vtable[CreateGraphicsPipelineStateIndex], HookedCreateGraphicsPipelineState,
-		"ID3D12Device::CreateGraphicsPipelineState");
-	DX12HookFunction(reinterpret_cast<void**>(&gOrigCreateComputePipelineState),
-		vtable[CreateComputePipelineStateIndex], HookedCreateComputePipelineState,
-		"ID3D12Device::CreateComputePipelineState");
+	constexpr UINT CreateGraphicsPipelineStateIndex = 10;
+	constexpr UINT CreateComputePipelineStateIndex = 11;
+	DX12VTableHook deviceHooks[] = {
+		{CreateGraphicsPipelineStateIndex, reinterpret_cast<void**>(&gOrigCreateGraphicsPipelineState),
+			HookedCreateGraphicsPipelineState, "ID3D12Device::CreateGraphicsPipelineState"},
+		{CreateComputePipelineStateIndex, reinterpret_cast<void**>(&gOrigCreateComputePipelineState),
+			HookedCreateComputePipelineState, "ID3D12Device::CreateComputePipelineState"},
+	};
+	DX12InstallVTableHooks(baseDevice, deviceHooks);
 	DX12HookResourceMetadata(baseDevice);
 	DX12HookCommandListCreation(baseDevice);
 	DX12Log("DX12 command queue hooks and command-list creation tracking enabled\n");
@@ -101,14 +95,13 @@ void DX12HookDevice(IUnknown *device)
 
 	ID3D12Device2 *device2 = nullptr;
 	if (SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&device2)))) {
-		void **vtable2 = *reinterpret_cast<void***>(device2);
-		if (vtable2) {
-			// IUnknown + ID3D12Object + ID3D12Device(37 methods) + ID3D12Device1(3 methods).
-			constexpr size_t CreatePipelineStateIndex = 47;
-			DX12HookFunction(reinterpret_cast<void**>(&gOrigCreatePipelineState),
-				vtable2[CreatePipelineStateIndex], HookedCreatePipelineState,
-				"ID3D12Device2::CreatePipelineState");
-		}
+		// IUnknown + ID3D12Object + ID3D12Device(37 methods) + ID3D12Device1(3 methods).
+		constexpr UINT CreatePipelineStateIndex = 47;
+		DX12VTableHook device2Hooks[] = {
+			{CreatePipelineStateIndex, reinterpret_cast<void**>(&gOrigCreatePipelineState),
+				HookedCreatePipelineState, "ID3D12Device2::CreatePipelineState"},
+		};
+		DX12InstallVTableHooks(device2, device2Hooks);
 		device2->Release();
 	}
 	// Command-list hooks only log/track metadata and forward calls unchanged.
@@ -123,13 +116,12 @@ void DX12HookDeviceFactory(IUnknown *factory)
 	if (FAILED(factory->QueryInterface(IID_PPV_ARGS(&deviceFactory))))
 		return;
 
-	void **vtable = *reinterpret_cast<void***>(deviceFactory);
-	if (vtable) {
-		constexpr size_t CreateDeviceIndex = 9;
-		DX12HookFunction(reinterpret_cast<void**>(&gOrigDeviceFactoryCreateDevice),
-			vtable[CreateDeviceIndex], HookedDeviceFactoryCreateDevice,
-			"ID3D12DeviceFactory::CreateDevice");
-	}
+	constexpr UINT CreateDeviceIndex = 9;
+	DX12VTableHook factoryHooks[] = {
+		{CreateDeviceIndex, reinterpret_cast<void**>(&gOrigDeviceFactoryCreateDevice),
+			HookedDeviceFactoryCreateDevice, "ID3D12DeviceFactory::CreateDevice"},
+	};
+	DX12InstallVTableHooks(deviceFactory, factoryHooks);
 	deviceFactory->Release();
 }
 

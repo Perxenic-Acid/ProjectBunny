@@ -7,6 +7,7 @@ add_library(DirectX12 SHARED
     DX12CommandListHooks.cpp
     DX12DeviceHooks.cpp
     DX12FrameAnalysis.cpp
+    DX12HookManager.cpp
     DX12Input.cpp
     DX12Overlay.cpp
     DX12ResourceDump.cpp

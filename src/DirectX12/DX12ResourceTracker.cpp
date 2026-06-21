@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "DX12FrameAnalysis.h"
+#include "DX12HookManager.h"
 #include "DX12State.h"
 
 static void GetSummaryDirectory(const wchar_t *dir, wchar_t *path, size_t pathCount)
@@ -1235,79 +1236,71 @@ void DX12HookResourceMetadata(ID3D12Device *device)
 		DX12Log("Resource metadata tracking uses non-owning resource pointers\n");
 	}
 
-	void **vtable = *reinterpret_cast<void***>(device);
-	if (!vtable)
-		return;
-
-	DX12HookFunction(reinterpret_cast<void**>(&gOrigCreateDescriptorHeap),
-		vtable[14], HookedCreateDescriptorHeap, "ID3D12Device::CreateDescriptorHeap");
-	DX12HookFunction(reinterpret_cast<void**>(&gOrigCreateRootSignature),
-		vtable[16], HookedCreateRootSignature, "ID3D12Device::CreateRootSignature");
-	DX12HookFunction(reinterpret_cast<void**>(&gOrigCreateConstantBufferView),
-		vtable[17], HookedCreateConstantBufferView, "ID3D12Device::CreateConstantBufferView");
-	DX12HookFunction(reinterpret_cast<void**>(&gOrigCreateShaderResourceView),
-		vtable[18], HookedCreateShaderResourceView, "ID3D12Device::CreateShaderResourceView");
-	DX12HookFunction(reinterpret_cast<void**>(&gOrigCreateUnorderedAccessView),
-		vtable[19], HookedCreateUnorderedAccessView, "ID3D12Device::CreateUnorderedAccessView");
-	DX12HookFunction(reinterpret_cast<void**>(&gOrigCreateRenderTargetView),
-		vtable[20], HookedCreateRenderTargetView, "ID3D12Device::CreateRenderTargetView");
-	DX12HookFunction(reinterpret_cast<void**>(&gOrigCreateDepthStencilView),
-		vtable[21], HookedCreateDepthStencilView, "ID3D12Device::CreateDepthStencilView");
-	DX12HookFunction(reinterpret_cast<void**>(&gOrigCreateSampler),
-		vtable[22], HookedCreateSampler, "ID3D12Device::CreateSampler");
-	DX12HookFunction(reinterpret_cast<void**>(&gOrigCopyDescriptors),
-		vtable[23], HookedCopyDescriptors, "ID3D12Device::CopyDescriptors");
-	DX12HookFunction(reinterpret_cast<void**>(&gOrigCopyDescriptorsSimple),
-		vtable[24], HookedCopyDescriptorsSimple, "ID3D12Device::CopyDescriptorsSimple");
-	DX12HookFunction(reinterpret_cast<void**>(&gOrigCreateCommittedResource),
-		vtable[27], HookedCreateCommittedResource, "ID3D12Device::CreateCommittedResource");
-	DX12HookFunction(reinterpret_cast<void**>(&gOrigCreatePlacedResource),
-		vtable[29], HookedCreatePlacedResource, "ID3D12Device::CreatePlacedResource");
-	DX12HookFunction(reinterpret_cast<void**>(&gOrigCreateReservedResource),
-		vtable[30], HookedCreateReservedResource, "ID3D12Device::CreateReservedResource");
+	DX12VTableHook deviceHooks[] = {
+		{14, reinterpret_cast<void**>(&gOrigCreateDescriptorHeap),
+			HookedCreateDescriptorHeap, "ID3D12Device::CreateDescriptorHeap"},
+		{16, reinterpret_cast<void**>(&gOrigCreateRootSignature),
+			HookedCreateRootSignature, "ID3D12Device::CreateRootSignature"},
+		{17, reinterpret_cast<void**>(&gOrigCreateConstantBufferView),
+			HookedCreateConstantBufferView, "ID3D12Device::CreateConstantBufferView"},
+		{18, reinterpret_cast<void**>(&gOrigCreateShaderResourceView),
+			HookedCreateShaderResourceView, "ID3D12Device::CreateShaderResourceView"},
+		{19, reinterpret_cast<void**>(&gOrigCreateUnorderedAccessView),
+			HookedCreateUnorderedAccessView, "ID3D12Device::CreateUnorderedAccessView"},
+		{20, reinterpret_cast<void**>(&gOrigCreateRenderTargetView),
+			HookedCreateRenderTargetView, "ID3D12Device::CreateRenderTargetView"},
+		{21, reinterpret_cast<void**>(&gOrigCreateDepthStencilView),
+			HookedCreateDepthStencilView, "ID3D12Device::CreateDepthStencilView"},
+		{22, reinterpret_cast<void**>(&gOrigCreateSampler),
+			HookedCreateSampler, "ID3D12Device::CreateSampler"},
+		{23, reinterpret_cast<void**>(&gOrigCopyDescriptors),
+			HookedCopyDescriptors, "ID3D12Device::CopyDescriptors"},
+		{24, reinterpret_cast<void**>(&gOrigCopyDescriptorsSimple),
+			HookedCopyDescriptorsSimple, "ID3D12Device::CopyDescriptorsSimple"},
+		{27, reinterpret_cast<void**>(&gOrigCreateCommittedResource),
+			HookedCreateCommittedResource, "ID3D12Device::CreateCommittedResource"},
+		{29, reinterpret_cast<void**>(&gOrigCreatePlacedResource),
+			HookedCreatePlacedResource, "ID3D12Device::CreatePlacedResource"},
+		{30, reinterpret_cast<void**>(&gOrigCreateReservedResource),
+			HookedCreateReservedResource, "ID3D12Device::CreateReservedResource"},
+	};
+	DX12InstallVTableHooks(device, deviceHooks);
 
 	ID3D12Device4 *device4 = nullptr;
 	if (SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&device4)))) {
-		void **vtable4 = *reinterpret_cast<void***>(device4);
-		if (vtable4) {
-			DX12HookFunction(reinterpret_cast<void**>(&gOrigCreateCommittedResource1),
-				vtable4[53], HookedCreateCommittedResource1,
-				"ID3D12Device4::CreateCommittedResource1");
-			DX12HookFunction(reinterpret_cast<void**>(&gOrigCreateReservedResource1),
-				vtable4[55], HookedCreateReservedResource1,
-				"ID3D12Device4::CreateReservedResource1");
-		}
+		DX12VTableHook device4Hooks[] = {
+			{53, reinterpret_cast<void**>(&gOrigCreateCommittedResource1),
+				HookedCreateCommittedResource1, "ID3D12Device4::CreateCommittedResource1"},
+			{55, reinterpret_cast<void**>(&gOrigCreateReservedResource1),
+				HookedCreateReservedResource1, "ID3D12Device4::CreateReservedResource1"},
+		};
+		DX12InstallVTableHooks(device4, device4Hooks);
 		device4->Release();
 	}
 
 	ID3D12Device8 *device8 = nullptr;
 	if (SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&device8)))) {
-		void **vtable8 = *reinterpret_cast<void***>(device8);
-		if (vtable8) {
-			DX12HookFunction(reinterpret_cast<void**>(&gOrigCreateCommittedResource2),
-				vtable8[69], HookedCreateCommittedResource2,
-				"ID3D12Device8::CreateCommittedResource2");
-			DX12HookFunction(reinterpret_cast<void**>(&gOrigCreatePlacedResource1),
-				vtable8[70], HookedCreatePlacedResource1,
-				"ID3D12Device8::CreatePlacedResource1");
-		}
+		DX12VTableHook device8Hooks[] = {
+			{69, reinterpret_cast<void**>(&gOrigCreateCommittedResource2),
+				HookedCreateCommittedResource2, "ID3D12Device8::CreateCommittedResource2"},
+			{70, reinterpret_cast<void**>(&gOrigCreatePlacedResource1),
+				HookedCreatePlacedResource1, "ID3D12Device8::CreatePlacedResource1"},
+		};
+		DX12InstallVTableHooks(device8, device8Hooks);
 		device8->Release();
 	}
 
 	ID3D12Device10 *device10 = nullptr;
 	if (SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&device10)))) {
-		void **vtable10 = *reinterpret_cast<void***>(device10);
-		if (vtable10) {
-			DX12HookFunction(reinterpret_cast<void**>(&gOrigCreateCommittedResource3),
-				vtable10[76], HookedCreateCommittedResource3,
-				"ID3D12Device10::CreateCommittedResource3");
-			DX12HookFunction(reinterpret_cast<void**>(&gOrigCreatePlacedResource2),
-				vtable10[77], HookedCreatePlacedResource2,
-				"ID3D12Device10::CreatePlacedResource2");
-			DX12HookFunction(reinterpret_cast<void**>(&gOrigCreateReservedResource2),
-				vtable10[78], HookedCreateReservedResource2,
-				"ID3D12Device10::CreateReservedResource2");
-		}
+		DX12VTableHook device10Hooks[] = {
+			{76, reinterpret_cast<void**>(&gOrigCreateCommittedResource3),
+				HookedCreateCommittedResource3, "ID3D12Device10::CreateCommittedResource3"},
+			{77, reinterpret_cast<void**>(&gOrigCreatePlacedResource2),
+				HookedCreatePlacedResource2, "ID3D12Device10::CreatePlacedResource2"},
+			{78, reinterpret_cast<void**>(&gOrigCreateReservedResource2),
+				HookedCreateReservedResource2, "ID3D12Device10::CreateReservedResource2"},
+		};
+		DX12InstallVTableHooks(device10, device10Hooks);
 		device10->Release();
 	}
 }
