@@ -56,7 +56,11 @@ class ZAYCHIK_PT_sidebar(Panel):
         )
         layout.prop(settings, "max_imports")
         layout.prop(settings, "import_all_matching")
+        layout.prop(settings, "apply_world_matrices")
+        if settings.apply_world_matrices:
+            layout.prop(settings, "world_matrix_scale")
         layout.prop(settings, "skin_source_filter")
+        layout.prop(settings, "vertex_layout_preset")
         layout.operator(ZAYCHIK_OT_import_dx12_dump.bl_idname, icon="IMPORT")
 
         box = layout.box()
@@ -85,4 +89,3 @@ def unregister() -> None:
             bpy.utils.unregister_class(klass)
         except (RuntimeError, ValueError):
             pass
-

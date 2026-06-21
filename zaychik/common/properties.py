@@ -1,10 +1,22 @@
 from __future__ import annotations
 
 import bpy
-from bpy.props import BoolProperty, CollectionProperty, EnumProperty, IntProperty, StringProperty
+from bpy.props import BoolProperty, CollectionProperty, EnumProperty, FloatProperty, IntProperty, StringProperty
 from bpy.types import PropertyGroup
 
 from .config import ConfigManager
+
+
+def on_frameanalysis_index_changed(self: PropertyGroup, context: bpy.types.Context) -> None:
+    """Keep selected_frameanalysis_name in sync when the active index changes."""
+    del context
+    items = self.frameanalysis_items
+    index = self.frameanalysis_index
+    if 0 <= index < len(items):
+        self.selected_frameanalysis_name = items[index].name
+    else:
+        self.selected_frameanalysis_name = ""
+    ConfigManager.save_config(self)
 
 
 class ZAYCHIK_PG_frameanalysis_item(PropertyGroup):
@@ -37,6 +49,19 @@ class ZAYCHIK_PG_settings(PropertyGroup):
         description="Import every matching draw up to Max Imports instead of stopping after the first success",
         default=True,
     ) # type: ignore
+    apply_world_matrices: BoolProperty(
+        name="Apply CBV World Matrix",
+        description="Apply a guessed world matrix from constant buffers; disable when imports appear far away or invisible",
+        default=False,
+    ) # type: ignore
+    world_matrix_scale: FloatProperty(
+        name="World Matrix Scale",
+        description="Scale applied after the guessed world matrix; use this to convert game units to Blender units",
+        default=0.001,
+        min=0.000001,
+        max=1000.0,
+        precision=6,
+    ) # type: ignore
     skin_source_filter: EnumProperty(
         name="Skin Source",
         description="Filter draw calls by detected pre-skinning source",
@@ -47,6 +72,17 @@ class ZAYCHIK_PG_settings(PropertyGroup):
         ),
         default="all",
     ) # type: ignore
+    vertex_layout_preset: EnumProperty(
+        name="Vertex Layout Preset",
+        description="Prefer game-specific vertex buffer layout definitions when decoding draws",
+        items=(
+            ("auto", "Auto", "Try all known presets"),
+            ("stellar_blade", "Stellar Blade", "Use Stellar Blade DX12 vertex layouts first"),
+            ("ue5", "UE5 Generic", "Use generic UE5 vertex layouts"),
+            ("generic", "Generic", "Use fallback position-only layouts"),
+        ),
+        default="stellar_blade",
+    ) # type: ignore
     last_status: StringProperty(
         name="Status",
         description="Latest importer status",
@@ -56,7 +92,7 @@ class ZAYCHIK_PG_settings(PropertyGroup):
     frameanalysis_index: IntProperty(
         name="FrameAnalysis Index",
         default=0,
-        update=lambda self, ctx: SettingsCallbacks.on_frameanalysis_index_changed(self, ctx),
+        update=on_frameanalysis_index_changed,
     ) # type: ignore
 
 
@@ -71,22 +107,7 @@ class SettingsCallbacks:
 
     @staticmethod
     def on_frameanalysis_index_changed(self: PropertyGroup, context: bpy.types.Context) -> None:
-        """Keep selected_frameanalysis_name in sync when the active index changes.
-
-        This runs both from user UI interaction AND from programmatic index
-        updates, which is fine: it is a pure property write and save_config,
-        so it is safe to call from any non-draw context. It MUST NOT be called
-        from a draw() handler, and indeed the UIList changes the index outside
-        of draw.
-        """
-        del context
-        items = self.frameanalysis_items
-        index = self.frameanalysis_index
-        if 0 <= index < len(items):
-            self.selected_frameanalysis_name = items[index].name
-        else:
-            self.selected_frameanalysis_name = ""
-        ConfigManager.save_config(self)
+        on_frameanalysis_index_changed(self, context)
 
 
 CLASSES = (

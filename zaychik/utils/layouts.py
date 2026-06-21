@@ -10,7 +10,7 @@ metadata and a :meth:`~VertexFactory.match` method.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, FrozenSet, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 from .formats import DxgiFormat, FormatInfo
 
@@ -79,6 +79,7 @@ class VertexFactory:
     name: str
     engine: str
     category: str
+    game: str
     streams: Tuple[StreamLayout, ...]
     index_format: Optional[str] = None
     notes: str = ""
@@ -118,16 +119,26 @@ class VertexFactory:
     @classmethod
     def match(cls,
               slot_info: Dict[int, Tuple[int, Optional[str]]],
-              ib_format: Optional[str]) -> Optional["VertexFactory"]:
+              ib_format: Optional[str],
+              preset: str = "auto") -> Optional["VertexFactory"]:
         """Pick the highest-scoring factory from the registry."""
         best_score = 0
         best_factory: Optional[VertexFactory] = None
         for factory in cls._REGISTRY:
+            if not factory.matches_preset(preset):
+                continue
             score = factory.score_for_draw(slot_info, ib_format)
             if score > best_score:
                 best_score = score
                 best_factory = factory
         return best_factory
+
+    def matches_preset(self, preset: str) -> bool:
+        if preset in ("", "auto"):
+            return True
+        if preset == "generic":
+            return self.game == "generic"
+        return self.game == preset
 
     # ----- Builder helpers for declaring presets -----
 
@@ -160,6 +171,7 @@ UE5_STATIC_MINIMAL = VertexFactory(
     name="UE5.StaticMinimal",
     engine="UE5",
     category="static",
+    game="ue5",
     notes="Position-only static draws (UI quads, post, shadows) with packed TBN in 4-byte stream.",
     streams=(
         S(0, 12, E(SEMANTIC_POSITION, 0, "DXGI_FORMAT_R32G32B32_FLOAT", 0, 0)),
@@ -171,6 +183,7 @@ UE5_STATIC_FULL = VertexFactory(
     name="UE5.StaticFull",
     engine="UE5",
     category="static",
+    game="ue5",
     notes="UE5 static mesh: pos3f + packed TBN snorm8x8 + 4 half2 UVs.",
     streams=(
         S(0, 12, E(SEMANTIC_POSITION, 0, "DXGI_FORMAT_R32G32B32_FLOAT", 0, 0)),
@@ -189,6 +202,7 @@ UE5_STATIC_UV8 = VertexFactory(
     name="UE5.StaticUV8",
     engine="UE5",
     category="static",
+    game="ue5",
     notes="UE5 static mesh with single half2 UV stream (stride 8).",
     streams=(
         S(0, 12, E(SEMANTIC_POSITION, 0, "DXGI_FORMAT_R32G32B32_FLOAT", 0, 0)),
@@ -203,6 +217,7 @@ UE5_STATIC_TANGENT_ONLY = VertexFactory(
     name="UE5.StaticTangentOnly",
     engine="UE5",
     category="static",
+    game="ue5",
     notes="UE5 static path with 4-byte TANGENT stream, no NORMAL stream (depth/shadow).",
     streams=(
         S(0, 12, E(SEMANTIC_POSITION, 0, "DXGI_FORMAT_R32G32B32_FLOAT", 0, 0)),
@@ -215,6 +230,7 @@ UE5_GPU_SKINNED_FULL = VertexFactory(
     name="UE5.GPUSkinnedFull",
     engine="UE5",
     category="gpu_preskinning",
+    game="ue5",
     notes="GPU pre-skinned mesh: pos+TBN+4 UVs (post-skin pose, same streams as static).",
     streams=UE5_STATIC_FULL.streams,
 )
@@ -223,6 +239,7 @@ UE5_GPU_SKINNED_EXPANDED = VertexFactory(
     name="UE5.GPUSkinnedExpanded",
     engine="UE5",
     category="gpu_preskinning",
+    game="ue5",
     notes="GPU pre-skinned: slot0 stride=32 (first 12b = post-skin position).",
     streams=(
         S(0, 32, E(SEMANTIC_POSITION, 0, "DXGI_FORMAT_R32G32B32_FLOAT", 0, 0)),
@@ -241,6 +258,7 @@ GENERIC_POSITION_ONLY_S12 = VertexFactory(
     name="Generic.PositionOnly",
     engine="generic",
     category="fallback",
+    game="generic",
     notes="Fallback: slot0 stride 12 POSITION float3.",
     streams=(S(0, 12, E(SEMANTIC_POSITION, 0, "DXGI_FORMAT_R32G32B32_FLOAT", 0, 0)),),
 )
@@ -249,6 +267,7 @@ GENERIC_POSITION_ONLY_S16 = VertexFactory(
     name="Generic.PositionOnlyS16",
     engine="generic",
     category="fallback",
+    game="generic",
     notes="Fallback: slot0 stride 16, POSITION float3 at offset 0.",
     streams=(S(0, 16, E(SEMANTIC_POSITION, 0, "DXGI_FORMAT_R32G32B32_FLOAT", 0, 0)),),
 )
@@ -257,13 +276,64 @@ GENERIC_POSITION_ONLY_S32 = VertexFactory(
     name="Generic.PositionOnlyS32",
     engine="generic",
     category="fallback",
+    game="generic",
     notes="Fallback: slot0 stride 32, POSITION float3 at offset 0.",
     streams=(S(0, 32, E(SEMANTIC_POSITION, 0, "DXGI_FORMAT_R32G32B32_FLOAT", 0, 0)),),
+)
+
+STELLAR_BLADE_STATIC_FULL = VertexFactory(
+    name="StellarBlade.StaticFull",
+    engine="UE5",
+    category="static",
+    game="stellar_blade",
+    notes="Stellar Blade main mesh preset: vb0 POSITION float3, vb1 packed tangent/normal, vb4 half UV sets.",
+    streams=UE5_STATIC_FULL.streams,
+)
+
+STELLAR_BLADE_STATIC_UV8 = VertexFactory(
+    name="StellarBlade.StaticUV8",
+    engine="UE5",
+    category="static",
+    game="stellar_blade",
+    notes="Stellar Blade static mesh with compact UV stream.",
+    streams=UE5_STATIC_UV8.streams,
+)
+
+STELLAR_BLADE_TANGENT_ONLY = VertexFactory(
+    name="StellarBlade.TangentOnly",
+    engine="UE5",
+    category="static",
+    game="stellar_blade",
+    notes="Stellar Blade depth/shadow style mesh: POSITION plus tangent stream.",
+    streams=UE5_STATIC_TANGENT_ONLY.streams,
+)
+
+STELLAR_BLADE_MINIMAL = VertexFactory(
+    name="StellarBlade.Minimal",
+    engine="UE5",
+    category="static",
+    game="stellar_blade",
+    notes="Stellar Blade minimal mesh: vb0 POSITION float3, vb1 packed tangent.",
+    streams=UE5_STATIC_MINIMAL.streams,
+)
+
+STELLAR_BLADE_GPU_SKINNED_EXPANDED = VertexFactory(
+    name="StellarBlade.GPUSkinnedExpanded",
+    engine="UE5",
+    category="gpu_preskinning",
+    game="stellar_blade",
+    notes="Stellar Blade GPU pre-skinned mesh: slot0 stride 32, position at offset 0.",
+    streams=UE5_GPU_SKINNED_EXPANDED.streams,
 )
 
 # Order matters: more specific factories first so same-score ties pick the
 # richer definition.
 VertexFactory.register(
+    STELLAR_BLADE_STATIC_FULL,
+    STELLAR_BLADE_STATIC_UV8,
+    STELLAR_BLADE_TANGENT_ONLY,
+    STELLAR_BLADE_MINIMAL,
+    STELLAR_BLADE_GPU_SKINNED_EXPANDED,
     UE5_STATIC_FULL,
     UE5_STATIC_UV8,
     UE5_STATIC_TANGENT_ONLY,

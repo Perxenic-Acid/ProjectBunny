@@ -3,7 +3,7 @@ from __future__ import annotations
 import importlib
 import sys
 import types
-from typing import ClassVar, Tuple
+from typing import TYPE_CHECKING, ClassVar, Tuple
 
 import bpy
 from bpy.props import PointerProperty
@@ -105,6 +105,12 @@ class ZaychikAddon:
         from .common import properties
         from .ui import operators, panel
         from .common.properties import ZAYCHIK_PG_settings
+
+        if hasattr(bpy.types.Scene, "zaychik_settings"):
+            try:
+                del bpy.types.Scene.zaychik_settings
+            except Exception:
+                pass
 
         # Register each module
         properties.register()

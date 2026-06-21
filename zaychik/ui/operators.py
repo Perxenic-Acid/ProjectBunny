@@ -67,6 +67,22 @@ class FrameAnalysisUI:
             return None
         return settings.frameanalysis_items[index].path
 
+    @staticmethod
+    def draw_import_priority(draw: object) -> tuple[int, int, int, int]:
+        """Rank likely model draws before UI quads and tiny helper draws."""
+        vertex_bindings = getattr(draw, "vertex_bindings", {})
+        slot_count = len(vertex_bindings)
+        index_count = int(getattr(draw, "index_count", 0) or 0)
+        instance_count = int(getattr(draw, "instance_count", 0) or 0)
+        has_full_ue_streams = all(slot in vertex_bindings for slot in (0, 1, 4))
+        likely_model = 1 if index_count >= 3000 and slot_count >= 3 else 0
+        return (
+            likely_model,
+            1 if has_full_ue_streams else 0,
+            index_count,
+            -instance_count,
+        )
+
 
 class ZAYCHIK_OT_refresh_frameanalysis_list(Operator):
     bl_idname = "zaychik.refresh_frameanalysis_list"
@@ -139,12 +155,21 @@ class ZAYCHIK_OT_import_dx12_dump(Operator):
             settings.last_status = "No usable draw calls"
             return {"CANCELLED"}
 
+        matching_draws.sort(key=FrameAnalysisUI.draw_import_priority, reverse=True)
+
         success_count = 0
         messages: List[str] = []
         limit = min(settings.max_imports, len(matching_draws))
         for draw in matching_draws[:limit]:
             try:
-                ok, message = DrawImporter.import_draw_call(context, dump_dir, draw)
+                ok, message = DrawImporter.import_draw_call(
+                    context,
+                    dump_dir,
+                    draw,
+                    settings.apply_world_matrices,
+                    settings.world_matrix_scale,
+                    settings.vertex_layout_preset,
+                )
             except Exception as exc:  # pragma: no cover - Blender runtime path
                 ok = False
                 message = f"event {draw.event}: {exc}"
@@ -154,11 +179,13 @@ class ZAYCHIK_OT_import_dx12_dump(Operator):
                 messages.append(message)
                 if not settings.import_all_matching:
                     break
+            elif len(messages) < 3:
+                messages.append(message)
 
         if success_count == 0:
             preview = messages[0] if messages else "No draw could be imported"
             self.report({"WARNING"}, preview)
-            settings.last_status = "Import attempt finished with 0 success"
+            settings.last_status = preview
             return {"CANCELLED"}
 
         settings.last_status = f"Imported {success_count} mesh object(s)"

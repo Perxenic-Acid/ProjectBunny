@@ -102,14 +102,14 @@ class DrawImporter:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def select_factory(draw: DrawCall) -> Optional[VertexFactory]:
+    def select_factory(draw: DrawCall, preset: str = "auto") -> Optional[VertexFactory]:
         slot_info: Dict[int, Tuple[int, Optional[str]]] = {
             slot: (b.stride, b.fmt_name)
             for slot, b in draw.vertex_bindings.items()
             if b.stride > 0
         }
         ib_fmt = draw.index_binding.fmt_name if draw.index_binding else None
-        return VertexFactory.match(slot_info, ib_fmt)
+        return VertexFactory.match(slot_info, ib_fmt, preset)
 
     @staticmethod
     def _element_by_semantic(draw: DrawCall, factory: VertexFactory,
@@ -186,7 +186,7 @@ class DrawImporter:
     def _score_world_matrix(matrix: Matrix) -> float:
         translation = matrix.to_translation()
         translation_len = translation.length
-        if translation_len > 1e7:
+        if translation_len > 10000.0:
             return -1.0
         basis_lengths = [matrix.col[i].to_3d().length for i in range(3)]
         if any(L < 1e-4 or L > 10000.0 for L in basis_lengths):
@@ -197,7 +197,7 @@ class DrawImporter:
         score = 0.0
         if translation_len > 0.001:
             score += 100.0
-        score += min(translation_len, 1e5) / 1e5
+        score += min(translation_len, 10000.0) / 10000.0
         score -= sum(abs(L - 1.0) for L in basis_lengths)
         return score
 
@@ -296,13 +296,16 @@ class DrawImporter:
 
     @classmethod
     def import_draw_call(cls, context: bpy.types.Context, dump_dir: str,
-                         draw: DrawCall) -> Tuple[bool, str]:
+                         draw: DrawCall,
+                         apply_world_matrix: bool = False,
+                         world_matrix_scale: float = 0.001,
+                         vertex_layout_preset: str = "auto") -> Tuple[bool, str]:
         if draw.topology != "TRIANGLELIST":
             return False, f"event {draw.event}: unsupported topology {draw.topology}"
         if draw.index_binding is None:
             return False, f"event {draw.event}: missing index buffer"
 
-        factory = cls.select_factory(draw)
+        factory = cls.select_factory(draw, vertex_layout_preset)
         if factory is None:
             return False, f"event {draw.event}: no matching vertex layout"
 
@@ -386,7 +389,10 @@ class DrawImporter:
             "gpu_preskinning": "GPU-PreSkinning",
             "cpu_preskinning": "CPU-PreSkinning",
         }.get(draw.skin_source, "Unknown-PreSkinning")
-        world_matrix = cls.find_draw_world_matrix(dump_dir, draw)
+        world_matrix = cls.find_draw_world_matrix(dump_dir, draw) if apply_world_matrix else None
+        if world_matrix is not None and world_matrix_scale != 1.0:
+            scale = max(float(world_matrix_scale), 0.000001)
+            world_matrix = Matrix.Diagonal((scale, scale, scale, 1.0)) @ world_matrix
         cls._create_mesh_object(context, object_name, positions, faces, uvs,
                                 normals, collection_name, world_matrix)
         return True, f"Imported {object_name} via {factory.name}"
