@@ -24,14 +24,45 @@ $vcvars = if ($Platform -eq 'x64') {
 
 # 检查 CMake
 if (-not (Test-Path $cmake)) {
-    Write-Host "ERROR: CMake not found at $cmake" -ForegroundColor Red
-    exit 1
+    Write-Host "WARN: CMake not found at $cmake" -ForegroundColor Yellow
+    # exit 1
+    $cmake = "cmake" # 尝试使用系统 PATH 中的 cmake
+    if (-not (Get-Command $cmake -ErrorAction SilentlyContinue)) {
+        Write-Host "ERROR: CMake not found in system PATH.\nPlease install CMake and ensure it is in your system PATH." -ForegroundColor Red
+        exit 1
+    } else {
+        Write-Host "INFO: Found CMake in system PATH" -ForegroundColor Green
+    }
 }
 
 # 检查 VS
 if (-not (Test-Path $vcvars)) {
-    Write-Host "ERROR: Visual Studio not found at $vsPath" -ForegroundColor Red
-    exit 1
+    Write-Host "WARN: Visual Studio not found at $vsPath" -ForegroundColor Yellow
+    # exit 1
+    Write-Host "WARN: Visual Studio not found at $vsPath. Attempting to use vswhere to locate vcvars..." -ForegroundColor Yellow
+    $vswherePath = "$env:ProgramFiles(x86)\Microsoft Visual Studio\Installer\vswhere.exe"
+    if (Test-Path $vswherePath) {
+        $vsInstallPath = & $vswherePath -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+        if ($vsInstallPath) {
+            $vcvars = if ($Platform -eq 'x64') {
+                "$vsInstallPath\VC\Auxiliary\Build\vcvars64.bat"
+            } else {
+                "$vsInstallPath\VC\Auxiliary\Build\vcvars32.bat"
+            }
+            if (Test-Path $vcvars) {
+                Write-Host "INFO: Found Visual Studio vcvars at $vcvars" -ForegroundColor Green
+            } else {
+                Write-Host "ERROR: Could not find vcvars batch file in Visual Studio installation at $vsInstallPath" -ForegroundColor Red
+                exit 1
+            }
+        } else {
+            Write-Host "ERROR: Could not locate Visual Studio installation with required VC tools using vswhere." -ForegroundColor Red
+            exit 1
+        }
+    } else {
+        Write-Host "ERROR: vswhere.exe not found at $vswherePath. Cannot locate Visual Studio installation." -ForegroundColor Red
+        exit 1
+    }
 }
 
 # 生成临时批处理文件（避免 cmd /c 的 & 转义问题）
@@ -80,6 +111,10 @@ foreach ($f in $files) {
 
 if ($Platform -eq 'x64') {
     $dx12GameRoot = "C:\SteamLibrary\steamapps\common\StellarBladeDemo"
+    if (-not (Test-Path $dx12GameRoot)) {
+        Write-Host "  Warning: DX12 test game root not found at $dx12GameRoot. Skipping DX12 test DLL copy and launch." -ForegroundColor Yellow
+        return
+    }
     $dx12TestDir = Join-Path $dx12GameRoot "SB\Binaries\Win64"
     $dx12Exe = Join-Path $dx12GameRoot "SB.exe"
     $dx12Dll = "$outDir\d3d12.dll"
