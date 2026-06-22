@@ -263,7 +263,7 @@ class DrawImporter:
                             normals: Optional[List[Tuple[float, float, float]]],
                             collection_name: Optional[str],
                             world_matrix: Optional[Matrix]) -> bpy.types.Object:
-        object_location: Optional[Vector] = None
+        local_center: Optional[Vector] = None
         if world_matrix is None and positions:
             min_x = min(p[0] for p in positions)
             min_y = min(p[1] for p in positions)
@@ -271,16 +271,16 @@ class DrawImporter:
             max_x = max(p[0] for p in positions)
             max_y = max(p[1] for p in positions)
             max_z = max(p[2] for p in positions)
-            object_location = Vector((
+            local_center = Vector((
                 (min_x + max_x) * 0.5,
                 (min_y + max_y) * 0.5,
                 (min_z + max_z) * 0.5,
             ))
             positions = [
                 (
-                    p[0] - object_location.x,
-                    p[1] - object_location.y,
-                    p[2] - object_location.z,
+                    p[0] - local_center.x,
+                    p[1] - local_center.y,
+                    p[2] - local_center.z,
                 )
                 for p in positions
             ]
@@ -310,8 +310,6 @@ class DrawImporter:
             context.collection.objects.link(obj)
         if world_matrix is not None:
             obj.matrix_world = world_matrix
-        elif object_location is not None:
-            obj.location = object_location
         return obj
 
     # ------------------------------------------------------------------
